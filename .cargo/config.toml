@@ -1,0 +1,2 @@
+[target.x86_64-unknown-uefi]
+runner = ["bash", "tools/uefi-test-runner.sh"]

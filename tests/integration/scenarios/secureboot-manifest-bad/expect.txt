@@ -1,0 +1,3 @@
+secureboot: enabled=1 forced=1
+secureboot: manifest path /boot/manifest
+secureboot kernel verify failed:

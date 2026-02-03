@@ -1,0 +1,3 @@
+./boot/kernel/virtio.ko
+./boot/kernel/virtio_pci.ko
+./boot/kernel/virtio_blk.ko

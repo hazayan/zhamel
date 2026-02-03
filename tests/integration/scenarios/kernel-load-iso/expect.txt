@@ -1,0 +1,4 @@
+kernel image found on iso9660:
+kernel image loaded: base=
+kernel image copied to memory: base=
+kernel modulep built:

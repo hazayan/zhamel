@@ -1,0 +1,5 @@
+# Minimal UFS2 superblock fixture (magic + sblockloc)
+@magic
+19 01 54 19
+@sblockloc
+00 00 01 00 00 00 00 00
