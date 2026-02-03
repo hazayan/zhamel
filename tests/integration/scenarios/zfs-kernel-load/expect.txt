@@ -1,0 +1,5 @@
+kernel image found on zfs:
+kernel ELF entry:
+kernel image loaded: base=
+kernel image copied to memory: base=
+kernel modulep built:

@@ -1,0 +1,2 @@
+zfs pools: 1
+zfs: pool 42 txg=7 bootenv v1 bootonce=zroot/ROOT/default

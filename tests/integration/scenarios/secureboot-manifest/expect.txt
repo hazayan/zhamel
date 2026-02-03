@@ -1,0 +1,7 @@
+secureboot: enabled=
+secureboot: manifest path /boot/manifest
+kernel image found on boot volume:
+kernel ELF entry:
+kernel image loaded: base=
+kernel image copied to memory: base=
+kernel modulep built:

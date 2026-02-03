@@ -1,0 +1,3 @@
+# Minimal UFS1 superblock fixture
+@magic
+54 19 01 00

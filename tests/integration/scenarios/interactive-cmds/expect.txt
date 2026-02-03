@@ -1,0 +1,4 @@
+interactive: start
+interactive: cmd memmap
+memmap:
+interactive: quit
