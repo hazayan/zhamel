@@ -51,6 +51,7 @@ pub fn read_file_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Resu
     read_file_from_objset(&block, pool.media_id, pool.block_size, &objset, path)
 }
 
+#[allow(dead_code)]
 pub fn list_dir_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Result<Vec<String>> {
     let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
         .map_err(|err| BootError::Uefi(err.status()))?;
@@ -335,6 +336,7 @@ pub fn read_file_from_objset(
     Ok(data)
 }
 
+#[allow(dead_code)]
 pub fn list_dir_from_objset(
     block: &BlockIO,
     media_id: u32,
@@ -346,6 +348,7 @@ pub fn list_dir_from_objset(
     zap_list(block, media_id, block_size, &dir)
 }
 
+#[allow(dead_code)]
 pub fn list_dir_entries_with_ids(
     block: &BlockIO,
     media_id: u32,
@@ -361,6 +364,7 @@ pub fn list_dir_entries_with_ids(
         .collect())
 }
 
+#[allow(dead_code)]
 pub fn read_file_from_objset_objid(
     block: &BlockIO,
     media_id: u32,
