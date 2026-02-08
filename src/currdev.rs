@@ -5,9 +5,17 @@ use alloc::vec::Vec;
 
 use crate::bootmgr::{BootEntry, BootInfo};
 use crate::env::loader::LoaderEnv;
+use crate::uefi_helpers::block_io::find_block_handle_by_device_path_exact;
+use crate::uefi_helpers::block_io::find_block_handle_by_device_path_prefix;
+use crate::uefi_helpers::block_io::find_block_handle_by_device_path_text_prefix;
+use crate::uefi_helpers::device_path::{
+    device_path_bytes_for_handle, device_path_has_cdrom, device_path_prefix_before_file_path,
+};
 use crate::uefi_helpers::partition_guid_from_device_path_bytes;
 use uefi::boot::{self, OpenProtocolParams};
+use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::network::snp::SimpleNetwork;
+use uefi::Handle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CurrDevSource {
@@ -20,6 +28,8 @@ pub struct CurrDev {
     pub description: String,
     pub partition_guid: Option<[u8; 16]>,
     pub kernel_path: Option<String>,
+    pub prefer_iso: bool,
+    pub iso_handle: Option<Handle>,
 }
 
 pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
@@ -35,6 +45,8 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
             description: alloc::format!("rootdev={}", rootdev),
             partition_guid: None,
             kernel_path: None,
+            prefer_iso: false,
+            iso_handle: None,
         });
     }
     if let Some(uefi_rootdev) = env.get("uefi_rootdev") {
@@ -43,6 +55,8 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
             description: alloc::format!("uefi_rootdev={}", uefi_rootdev),
             partition_guid: None,
             kernel_path: None,
+            prefer_iso: false,
+            iso_handle: None,
         });
     }
 
@@ -52,6 +66,8 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
             description: alloc::format!("zfs bootenv {}", active),
             partition_guid: None,
             kernel_path: None,
+            prefer_iso: false,
+            iso_handle: None,
         });
     }
     if let Some(bootonce) = env.get("zfs_bootonce") {
@@ -61,6 +77,8 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
             description: alloc::format!("zfs bootenv {}", active),
             partition_guid: None,
             kernel_path: None,
+            prefer_iso: false,
+            iso_handle: None,
         });
     }
 
@@ -68,10 +86,18 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
         let desc = describe_boot_entry(entry.number, &info.entries);
         let guid = entry_partition_guid(entry.number, &info.entries);
         let kernel_path = kernel_path_from_entry(entry);
+        let prefer_iso = entry_prefers_iso(entry);
+        let iso_handle = entry_iso_handle(entry);
         if guid.is_none() {
             if let Some(mut fallback) = fallback_from_loaded_image() {
                 if fallback.kernel_path.is_none() {
                     fallback.kernel_path = kernel_path;
+                }
+                if prefer_iso {
+                    fallback.prefer_iso = true;
+                }
+                if fallback.iso_handle.is_none() && iso_handle.is_some() {
+                    fallback.iso_handle = iso_handle;
                 }
                 return Some(fallback);
             }
@@ -81,6 +107,8 @@ pub fn select_currdev(info: &BootInfo, env: &LoaderEnv) -> Option<CurrDev> {
             description: desc,
             partition_guid: guid,
             kernel_path,
+            prefer_iso,
+            iso_handle,
         });
     }
 
@@ -278,13 +306,21 @@ fn device_path_file_path(bytes: &[u8]) -> Option<String> {
 
 fn fallback_from_loaded_image() -> Option<CurrDev> {
     let image_handle = boot::image_handle();
-    let guid = crate::uefi_helpers::device_path::partition_guid_for_handle(image_handle);
+    let mut device_handle = image_handle;
+    if let Ok(loaded) = boot::open_protocol_exclusive::<LoadedImage>(image_handle) {
+        if let Some(device) = loaded.device() {
+            device_handle = device;
+        }
+    }
+    let guid = crate::uefi_helpers::device_path::partition_guid_for_handle(device_handle);
     if let Some(guid) = guid {
         return Some(CurrDev {
             source: CurrDevSource::Fallback,
-            description: String::from("image_handle"),
+            description: String::from("image_device"),
             partition_guid: Some(guid),
             kernel_path: None,
+            prefer_iso: image_handle_is_cdrom(),
+            iso_handle: image_iso_handle(),
         });
     }
 
@@ -300,8 +336,79 @@ fn fallback_from_loaded_image() -> Option<CurrDev> {
             description: String::from("netboot"),
             partition_guid: None,
             kernel_path: None,
+            prefer_iso: false,
+            iso_handle: None,
         });
     }
 
     None
+}
+
+fn entry_prefers_iso(entry: &BootEntry) -> bool {
+    if entry
+        .file_path_bytes
+        .as_deref()
+        .map(device_path_has_cdrom)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some(desc) = entry.description.as_deref() {
+        if text_prefers_iso(desc) {
+            return true;
+        }
+    }
+    if let Some(path) = entry.device_path.as_deref() {
+        if text_prefers_iso(path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn image_handle_is_cdrom() -> bool {
+    let handle = boot::image_handle();
+    let Some(bytes) = device_path_bytes_for_handle(handle) else {
+        return false;
+    };
+    device_path_has_cdrom(&bytes)
+}
+
+fn entry_iso_handle(entry: &BootEntry) -> Option<Handle> {
+    if let Some(bytes) = entry.file_path_bytes.as_ref() {
+        if let Some(prefix) = device_path_prefix_before_file_path(bytes) {
+            if let Some(handle) = find_block_handle_by_device_path_exact(&prefix) {
+                return Some(handle);
+            }
+        }
+        if let Some(handle) = find_block_handle_by_device_path_prefix(bytes) {
+            return Some(handle);
+        }
+    }
+    if let Some(text) = entry.device_path.as_deref() {
+        if let Some(handle) = find_block_handle_by_device_path_text_prefix(text) {
+            return Some(handle);
+        }
+    }
+    None
+}
+
+fn image_iso_handle() -> Option<Handle> {
+    let handle = boot::image_handle();
+    if let Some(bytes) = device_path_bytes_for_handle(handle) {
+        if let Some(found) = find_block_handle_by_device_path_prefix(&bytes) {
+            return Some(found);
+        }
+    }
+    if let Some(text) = crate::uefi_helpers::device_path::device_path_text_for_loaded_image(handle) {
+        if let Some(found) = find_block_handle_by_device_path_text_prefix(&text) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn text_prefers_iso(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("dvd") || lower.contains("cdrom")
 }

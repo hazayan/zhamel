@@ -3,8 +3,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::kernel::types::{
-    ModInfoMd, MODINFO_ADDR, MODINFO_END, MODINFO_METADATA, MODINFO_NAME, MODINFO_SIZE,
-    MODINFO_TYPE,
+    ModInfoMd, MODINFO_ADDR, MODINFO_ARGS, MODINFO_END, MODINFO_METADATA, MODINFO_NAME,
+    MODINFO_SIZE, MODINFO_TYPE,
 };
 use alloc::string::ToString;
 
@@ -33,6 +33,12 @@ impl ModulepBuilder {
 
     pub fn add_size(&mut self, size: u64) {
         self.add_u64(MODINFO_SIZE, size);
+    }
+
+    pub fn add_args(&mut self, args: &str) {
+        if !args.is_empty() {
+            self.add_string(MODINFO_ARGS, args);
+        }
     }
 
     pub fn add_u64(&mut self, type_: u32, value: u64) {
@@ -69,6 +75,14 @@ impl ModulepBuilder {
         self.add_bytes(MODINFO_METADATA | md as u32, bytes);
     }
 
+    pub fn add_metadata_u64(&mut self, md: ModInfoMd, value: u64) {
+        self.add_u64(MODINFO_METADATA | md as u32, value);
+    }
+
+    pub fn add_metadata_u32(&mut self, md: ModInfoMd, value: u32) {
+        self.add_u32(MODINFO_METADATA | md as u32, value);
+    }
+
     pub fn add_end(&mut self) {
         self.push_u32(MODINFO_END);
         self.push_u32(0);
@@ -82,9 +96,12 @@ impl ModulepBuilder {
     pub fn add_module(&mut self, module: &Module) -> bool {
         self.add_name(&module.name);
         self.add_type(module.module_type.clone());
+        if let Some(args) = module.args.as_deref() {
+            self.add_args(args);
+        }
         if let Some(addr) = module.phys_addr {
             self.add_addr(addr);
-            self.add_size(module.data.len() as u64);
+            self.add_size(module.data_len as u64);
             true
         } else {
             false

@@ -51,6 +51,43 @@ pub fn read_file(
     read_bytes(block, media_id, block_size, offset, entry.size as usize)
 }
 
+pub fn file_size(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    volume: IsoVolume,
+    path: &str,
+) -> Option<usize> {
+    let entry = find_entry(block, media_id, block_size, volume, path)?;
+    if entry.flags & 0x02 != 0 {
+        return None;
+    }
+    Some(entry.size as usize)
+}
+
+pub fn read_file_into(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    volume: IsoVolume,
+    path: &str,
+    dst: *mut u8,
+    dst_len: usize,
+) -> Option<usize> {
+    let entry = find_entry(block, media_id, block_size, volume, path)?;
+    if entry.flags & 0x02 != 0 {
+        return None;
+    }
+    let size = entry.size as usize;
+    if size > dst_len {
+        return None;
+    }
+    let file_offset = entry.extent_lba as u64 * ISO_SECTOR_SIZE as u64;
+    read_into(block, media_id, block_size, file_offset, dst, size)?;
+    Some(size)
+}
+
+#[allow(dead_code)]
 pub fn read_dir_entries(
     block: &BlockIO,
     media_id: u32,
@@ -215,24 +252,153 @@ fn read_bytes(
     offset: u64,
     len: usize,
 ) -> Option<Vec<u8>> {
+    
     if len == 0 || block_size == 0 {
         return Some(Vec::new());
+    }
+    let mut out = alloc::vec::Vec::with_capacity(len);
+    // SAFETY: we fully overwrite every byte before returning.
+    unsafe {
+        out.set_len(len);
+    }
+    read_into(block, media_id, block_size, offset, out.as_mut_ptr(), len)?;
+    Some(out)
+}
+
+fn read_into(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    offset: u64,
+    dst: *mut u8,
+    len: usize,
+) -> Option<()> {
+    // Dynamically size reads based on file size and media type.
+    let mut max_blocks_per_read = compute_max_blocks_per_read(len, block_size, block);
+
+    if len == 0 || block_size == 0 {
+        return Some(());
     }
     let start_lba = offset / block_size as u64;
     let end = offset + len as u64;
     let end_lba = (end + block_size as u64 - 1) / block_size as u64;
-    let blocks = end_lba.saturating_sub(start_lba) as usize;
-    if blocks == 0 {
+    let mut blocks_left = end_lba.saturating_sub(start_lba) as usize;
+    if blocks_left == 0 {
         return None;
     }
-    let mut buf = alloc::vec![0u8; blocks * block_size];
-    block.read_blocks(media_id, start_lba, &mut buf).ok()?;
-    let start_off = (offset % block_size as u64) as usize;
-    let end_off = start_off + len;
-    if end_off > buf.len() {
+    let last_block = block.media().last_block();
+    if end_lba == 0 || end_lba - 1 > last_block {
+        log::warn!(
+            "iso9660: read beyond media (start_lba=0x{:x} end_lba=0x{:x} last=0x{:x})",
+            start_lba,
+            end_lba.saturating_sub(1),
+            last_block
+        );
         return None;
     }
-    Some(buf[start_off..end_off].to_vec())
+    let io_align = block.media().io_align() as usize;
+    let max_chunk_size = max_blocks_per_read * block_size;
+    let mut raw = alloc::vec![0u8; max_chunk_size + io_align.max(1)];
+    let base = raw.as_mut_ptr() as usize;
+    let align_off = if io_align <= 1 {
+        0
+    } else {
+        (io_align - (base % io_align)) % io_align
+    };
+    if align_off + max_chunk_size > raw.len() {
+        return None;
+    }
+    let mut out_offset = 0usize;
+    let mut current_lba = start_lba;
+    let mut start_skip = (offset % block_size as u64) as usize;
+    let mut _chunk_index = 0usize;
+    let _log_progress = false;
+
+    while blocks_left > 0 {
+        let mut chunk_blocks = core::cmp::min(blocks_left, max_blocks_per_read);
+        let mut chunk_size = chunk_blocks * block_size;
+        loop {
+            let aligned = &mut raw[align_off..align_off + chunk_size];
+            if let Err(err) = block.read_blocks(media_id, current_lba, aligned) {
+                if chunk_blocks <= 1 {
+                    log::warn!("iso9660: read_blocks failed: {:?}", err.status());
+                    return None;
+                }
+                // Some firmware is sensitive to large transfer sizes; back off.
+                chunk_blocks = core::cmp::max(1, chunk_blocks / 2);
+                chunk_size = chunk_blocks * block_size;
+                max_blocks_per_read = chunk_blocks;
+                continue;
+            }
+            break;
+        }
+        let aligned = &mut raw[align_off..align_off + chunk_size];
+
+        let chunk_start = start_skip;
+        let mut chunk_end = chunk_size;
+        if blocks_left == chunk_blocks {
+            let end_off = ((offset + len as u64) - current_lba * block_size as u64) as usize;
+            if end_off <= chunk_size {
+                chunk_end = end_off;
+            }
+        }
+        if chunk_end < chunk_start {
+            return None;
+        }
+        let chunk_len = chunk_end - chunk_start;
+        if out_offset + chunk_len > len {
+            return None;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                aligned.as_ptr().add(chunk_start),
+                dst.add(out_offset),
+                chunk_len,
+            );
+        }
+        out_offset += chunk_len;
+        
+        _chunk_index += 1;
+
+        current_lba = current_lba.saturating_add(chunk_blocks as u64);
+        blocks_left -= chunk_blocks;
+        start_skip = 0;
+    }
+    if out_offset != len {
+        return None;
+    }
+    Some(())
+}
+
+fn compute_max_blocks_per_read(len: usize, block_size: usize, block: &BlockIO) -> usize {
+    if block_size == 0 {
+        return 1;
+    }
+    let min_bytes = 32 * 1024;
+    let max_bytes = if block.media().is_removable_media() {
+        16 * 1024 * 1024
+    } else {
+        4 * 1024 * 1024
+    };
+    let target_calls = if len >= 128 * 1024 * 1024 {
+        16usize
+    } else if len >= 32 * 1024 * 1024 {
+        256usize
+    } else {
+        1024usize
+    };
+    let mut desired = if len <= min_bytes { len } else { len / target_calls };
+    if desired < min_bytes {
+        desired = min_bytes;
+    }
+    if desired > max_bytes {
+        desired = max_bytes;
+    }
+    if desired < block_size {
+        desired = block_size;
+    }
+    let blocks = desired / block_size;
+    if blocks == 0 { 1 } else { blocks }
 }
 
 #[cfg(test)]

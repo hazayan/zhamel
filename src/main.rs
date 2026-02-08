@@ -62,7 +62,100 @@ use uefi::boot;
 #[cfg(target_os = "uefi")]
 use uefi::prelude::*;
 #[cfg(target_os = "uefi")]
+use alloc::collections::BTreeMap;
+#[cfg(target_os = "uefi")]
 use alloc::string::ToString;
+#[cfg(target_os = "uefi")]
+use crate::kernel::types::ModuleType;
+
+#[cfg(target_os = "uefi")]
+fn parse_u32(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    }
+}
+
+#[cfg(target_os = "uefi")]
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value,
+        "1" | "YES" | "yes" | "true" | "TRUE" | "on" | "ON"
+    )
+}
+
+#[cfg(target_os = "uefi")]
+fn boot_howto_from_env(env: &env::loader::LoaderEnv) -> u32 {
+    let mut howto = env.get("boot_howto").and_then(parse_u32).unwrap_or(0);
+    if env.get("boot_verbose").map_or(false, is_truthy) {
+        howto |= RB_VERBOSE;
+    }
+    if env.get("boot_serial").map_or(false, is_truthy) {
+        howto |= RB_SERIAL;
+    }
+    if env.get("boot_multicons").map_or(false, is_truthy) {
+        howto |= RB_MULTIPLE;
+    }
+    if env.get("boot_askname").map_or(false, is_truthy) {
+        howto |= RB_ASKNAME;
+    }
+    if env.get("boot_single").map_or(false, is_truthy) {
+        howto |= RB_SINGLE;
+    }
+    if env.get("boot_pause").map_or(false, is_truthy) {
+        howto |= RB_PAUSE;
+    }
+    if env.get("boot_cdrom").map_or(false, is_truthy) {
+        howto |= RB_CDROM;
+    }
+    if env.get("boot_halt").map_or(false, is_truthy) {
+        howto |= RB_HALT;
+    }
+    if env.get("boot_poweroff").map_or(false, is_truthy) {
+        howto |= RB_POWEROFF;
+    }
+    if env.get("boot_kdb").map_or(false, is_truthy) {
+        howto |= RB_KDB;
+    }
+    if env.get("boot_gdb").map_or(false, is_truthy) {
+        howto |= RB_GDB;
+    }
+    if env.get("boot_mute").map_or(false, is_truthy) {
+        howto |= RB_MUTE;
+    }
+    if env.get("boot_mutemsgs").map_or(false, is_truthy) {
+        howto |= RB_MUTEMSGS;
+    }
+    if env.get("boot_probe").map_or(false, is_truthy) {
+        howto |= RB_PROBE;
+    }
+    howto
+}
+
+#[cfg(target_os = "uefi")]
+fn dump_env_if_requested(env: &env::loader::LoaderEnv) {
+    let enabled = matches!(
+        env.get("zhamel_env_dump"),
+        Some("1") | Some("YES") | Some("yes") | Some("true")
+    );
+    if !enabled {
+        return;
+    }
+    let mut merged: BTreeMap<&str, &str> = BTreeMap::new();
+    for var in &env.conf_vars {
+        merged.insert(var.key.as_str(), var.value.as_str());
+    }
+    for var in &env.env_vars {
+        merged.insert(var.key.as_str(), var.value.as_str());
+    }
+    log::info!("ZENV-BEGIN");
+    for (key, value) in merged {
+        log::info!("{}={}", key, value);
+    }
+    log::info!("ZENV-END");
+}
 
 #[cfg(all(target_os = "uefi", not(test)))]
 #[panic_handler]
@@ -70,11 +163,40 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+#[cfg(target_os = "uefi")]
+const RB_ASKNAME: u32 = 0x001;
+#[cfg(target_os = "uefi")]
+const RB_SINGLE: u32 = 0x002;
+#[cfg(target_os = "uefi")]
+const RB_HALT: u32 = 0x008;
+#[cfg(target_os = "uefi")]
+const RB_KDB: u32 = 0x040;
+#[cfg(target_os = "uefi")]
+const RB_VERBOSE: u32 = 0x800;
+#[cfg(target_os = "uefi")]
+const RB_SERIAL: u32 = 0x1000;
+#[cfg(target_os = "uefi")]
+const RB_CDROM: u32 = 0x2000;
+#[cfg(target_os = "uefi")]
+const RB_POWEROFF: u32 = 0x4000;
+#[cfg(target_os = "uefi")]
+const RB_GDB: u32 = 0x8000;
+#[cfg(target_os = "uefi")]
+const RB_MUTE: u32 = 0x10000;
+#[cfg(target_os = "uefi")]
+const RB_PAUSE: u32 = 0x100000;
+#[cfg(target_os = "uefi")]
+const RB_PROBE: u32 = 0x10000000;
+#[cfg(target_os = "uefi")]
+const RB_MULTIPLE: u32 = 0x20000000;
+#[cfg(target_os = "uefi")]
+const RB_MUTEMSGS: u32 = 0x800000;
+
 #[cfg(all(target_os = "uefi", not(test)))]
 fn handle_kernel_image(
     kernel: alloc::vec::Vec<u8>,
     mut modules: alloc::vec::Vec<crate::kernel::module::Module>,
-    loader_env: &crate::env::loader::LoaderEnv,
+    loader_env: &mut crate::env::loader::LoaderEnv,
     source_label: &str,
 ) -> Option<Status> {
     if let Err(err) = secureboot::verify_path(
@@ -87,7 +209,14 @@ fn handle_kernel_image(
         return Some(Status::SECURITY_VIOLATION);
     }
     for module in &modules {
-        let path = alloc::format!("/boot/kernel/{}", module.name);
+        if matches!(&module.module_type, ModuleType::Raw(_)) {
+            continue;
+        }
+        let path = if module.name.starts_with('/') {
+            module.name.clone()
+        } else {
+            alloc::format!("/boot/kernel/{}", module.name)
+        };
         if let Err(err) = secureboot::verify_path(&path, &module.data) {
             log::warn!("secureboot module verify failed: {} ({})", err, path);
             return Some(Status::SECURITY_VIOLATION);
@@ -101,7 +230,7 @@ fn handle_kernel_image(
     let loader = kernel::elf::ElfLoader;
     log::info!("kernel modules discovered: {}", modules.len());
     match loader.load_kernel_image(&kernel) {
-        Ok(loaded) => {
+        Ok(mut loaded) => {
             log::info!(
                 "kernel ELF entry: 0x{:016x} phdrs: {}",
                 loaded.entry,
@@ -112,7 +241,10 @@ fn handle_kernel_image(
                 loaded.base,
                 loaded.image.len()
             );
+            kernel::patch_headless_vga(&mut loaded, &kernel, loader_env);
             let envp = kernel::build_envp(loader_env);
+            let howto = boot_howto_from_env(loader_env);
+            log::info!("boot_howto: 0x{:x}", howto);
             let stage_copy = matches!(
                 loader_env.get("zhamel_stage_copy"),
                 Some("1") | Some("YES") | Some("yes") | Some("true")
@@ -131,7 +263,49 @@ fn handle_kernel_image(
                     &mut modules,
                     efi_map.as_deref(),
                     Some(envp.as_slice()),
+                    howto,
                 ));
+            }
+
+            if handoff::should_handoff(loader_env) {
+                match kernel::load_kernel_to_memory_at(&loaded, kernel::KERNEL_PHYS_BASE) {
+                    Ok(phys) => {
+                        log::info!(
+                            "kernel image copied to memory: base=0x{:016x} size={}",
+                            phys.base,
+                            phys.size
+                        );
+                        if let Err(err) = kernel::load_modules_to_memory(&mut modules) {
+                            log::warn!("module memory allocation failed: {}", err);
+                        } else {
+                            let allocated = modules.iter().filter(|m| m.phys_addr.is_some()).count();
+                            log::info!("kernel modules allocated: {}", allocated);
+                        }
+                        log::warn!("handoff requested; exiting boot services");
+                        return Some(handoff::handoff_to_kernel(
+                            phys,
+                            &mut modules,
+                            efi_map.as_deref(),
+                            Some(envp.as_slice()),
+                            howto,
+                            false,
+                        ));
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "kernel alloc at 0x{:x} failed: {}; falling back to staged handoff",
+                            kernel::KERNEL_PHYS_BASE,
+                            err
+                        );
+                        return Some(handoff::handoff_to_kernel_staged(
+                            &loaded,
+                            &mut modules,
+                            efi_map.as_deref(),
+                            Some(envp.as_slice()),
+                            howto,
+                        ));
+                    }
+                }
             }
 
             match kernel::load_kernel_to_memory(&loaded) {
@@ -141,25 +315,7 @@ fn handle_kernel_image(
                         phys.base,
                         phys.size
                     );
-                    if handoff::should_handoff(loader_env) {
-                        if let Err(err) = kernel::load_modules_to_memory(&mut modules) {
-                            log::warn!("module memory allocation failed: {}", err);
-                        } else {
-                            let allocated = modules
-                                .iter()
-                                .filter(|m| m.phys_addr.is_some())
-                                .count();
-                            log::info!("kernel modules allocated: {}", allocated);
-                        }
-                        log::warn!("handoff requested; exiting boot services");
-                        return Some(handoff::handoff_to_kernel(
-                            phys,
-                            &mut modules,
-                            efi_map.as_deref(),
-                            Some(envp.as_slice()),
-                            false,
-                        ));
-                    } else if let Some(modulep) = kernel::build_kernel_modulep_with_metadata(
+                    if let Some(modulep) = kernel::build_kernel_modulep_with_metadata(
                         loaded.base,
                         loaded.image.len() as u64,
                         &modules,
@@ -246,12 +402,8 @@ fn main() -> Status {
         .as_deref()
         .and_then(|path| fs::uefi::read_file_from_boot_volume(path));
     secureboot::init(&mut loader_env, manifest_bytes, manifest_path.as_deref());
-    let mut boot_volume_kernel = kernel::read_kernel_from_boot_volume(&loader_env);
-    let mut boot_volume_modules = if boot_volume_kernel.is_some() {
-        Some(kernel::discover_modules_from_boot_volume())
-    } else {
-        None
-    };
+    dump_env_if_requested(&loader_env);
+    let mut boot_volume_kernel: Option<alloc::vec::Vec<u8>> = None;
     time::init();
     let _block_cache = block_cache::init(&loader_env);
     let _devsw = devsw::init();
@@ -308,14 +460,14 @@ fn main() -> Status {
 
     if let Some((pool_index, kernel)) = kernel::read_kernel_from_zfs_bootfs(&zfs_pools, &loader_env)
     {
-        let modules = kernel::discover_modules_from_zfs_bootfs(&zfs_pools, pool_index);
-        if let Some(status) = handle_kernel_image(kernel, modules, &loader_env, "zfs") {
+        let modules = kernel::discover_modules_from_zfs_bootfs(&zfs_pools, pool_index, &mut loader_env);
+        if let Some(status) = handle_kernel_image(kernel, modules, &mut loader_env, "zfs") {
             return status;
         }
     } else if let Some(bootonce) = zfs::bootonce_for_pools(&zfs_pools) {
         if let Some(kernel) = kernel::read_kernel_from_zfs(&zfs_pools, bootonce, &loader_env) {
-            let modules = kernel::discover_modules_from_zfs(&zfs_pools, bootonce);
-            if let Some(status) = handle_kernel_image(kernel, modules, &loader_env, "zfs") {
+            let modules = kernel::discover_modules_from_zfs(&zfs_pools, bootonce, &mut loader_env);
+            if let Some(status) = handle_kernel_image(kernel, modules, &mut loader_env, "zfs") {
                 return status;
             }
         } else {
@@ -324,12 +476,44 @@ fn main() -> Status {
     }
 
     let boot_info = bootmgr::collect();
-    let curr = currdev::select_currdev(&boot_info, &loader_env);
-    if let Some(curr) = curr {
+    let mut curr = currdev::select_currdev(&boot_info, &loader_env);
+    if let Some(curr) = curr.as_mut() {
         log::info!("currdev selected: {} ({:?})", curr.description, curr.source);
+        if curr.prefer_iso {
+            log::info!("currdev prefers iso9660");
+            if let Some(handle) = curr.iso_handle {
+                if let Some(text) = crate::uefi_helpers::device_path::device_path_text_for_handle(handle) {
+                    log::info!("iso9660 handle: {}", text);
+                } else {
+                    log::info!("iso9660 handle resolved (no text)");
+                }
+            } else {
+                log::warn!("iso9660 handle not resolved; will scan devices");
+            }
+        }
         if let Some(kernel_path) = curr.kernel_path.as_deref() {
             loader_env.set("kernel", kernel_path);
             log::info!("kernel override from boot entry: {}", kernel_path);
+        }
+        if let Some(guid) = curr.partition_guid {
+            if let Some(match_info) = gpt::find_partition_by_guid(&gpt_disks, guid) {
+                if gpt::partition_kind(match_info.partition.type_guid)
+                    == gpt::GptPartitionKind::EfiSystem
+                {
+                    if let Some(ufs_part) = gpt_disks[match_info.disk_index]
+                        .partitions
+                        .iter()
+                        .find(|p| gpt::partition_kind(p.type_guid) == gpt::GptPartitionKind::FreeBsdUfs)
+                    {
+                        log::info!(
+                            "currdev ESP; switching to UFS partition {} on disk {}",
+                            ufs_part.index,
+                            match_info.disk_index
+                        );
+                        curr.partition_guid = Some(ufs_part.unique_guid);
+                    }
+                }
+            }
         }
         if let Some(guid) = curr.partition_guid {
             if let Some(match_info) = gpt::find_partition_by_guid(&gpt_disks, guid) {
@@ -338,7 +522,9 @@ fn main() -> Status {
                     match_info.disk_index,
                     match_info.partition.index
                 );
-                if let Some(conf_vars) = env::loader::load_loader_conf_from_partition_guid(guid) {
+                if let Some(conf_vars) =
+                    env::loader::load_loader_conf_from_partition_guid(guid, &loader_env.env_vars)
+                {
                     log::info!(
                         "loader.conf reloaded from currdev: {} vars",
                         conf_vars.len()
@@ -346,9 +532,9 @@ fn main() -> Status {
                     loader_env.conf_vars = conf_vars;
                 }
                 if let Some(kernel) = kernel::read_kernel_from_currdev(guid, &loader_env) {
-                    let modules = kernel::discover_modules_from_currdev(guid);
+                    let modules = kernel::discover_modules_from_currdev(guid, &mut loader_env);
                     if let Some(status) =
-                        handle_kernel_image(kernel, modules, &loader_env, "currdev")
+                        handle_kernel_image(kernel, modules, &mut loader_env, "currdev")
                     {
                         return status;
                     }
@@ -368,23 +554,44 @@ fn main() -> Status {
             } else {
                 log::warn!("currdev partition guid not found in gpt");
             }
-        } else if let Some(kernel) = boot_volume_kernel
-            .take()
-            .or_else(|| kernel::read_kernel_from_boot_volume(&loader_env))
-        {
-            let modules = boot_volume_modules
+        }
+        if curr.partition_guid.is_none() {
+            if curr.prefer_iso {
+                let iso_result = if let Some(handle) = curr.iso_handle {
+                    kernel::read_kernel_from_iso_handle(handle, &loader_env)
+                } else {
+                    kernel::read_kernel_from_iso_devices(&loader_env)
+                };
+                if let Some((iso, kernel)) = iso_result {
+                    let modules = kernel::discover_modules_from_iso(&iso, &mut loader_env);
+                    if let Some(status) =
+                        handle_kernel_image(kernel, modules, &mut loader_env, "iso9660")
+                    {
+                        return status;
+                    }
+                }
+            }
+            if let Some(kernel) = boot_volume_kernel
                 .take()
-                .unwrap_or_else(kernel::discover_modules_from_boot_volume);
-            if let Some(status) = handle_kernel_image(kernel, modules, &loader_env, "boot volume") {
-                return status;
+                .or_else(|| kernel::read_kernel_from_boot_volume(&loader_env))
+            {
+                let modules = kernel::discover_modules_from_boot_volume(&mut loader_env);
+                if let Some(status) =
+                    handle_kernel_image(kernel, modules, &mut loader_env, "boot volume")
+                {
+                    return status;
+                }
             }
-        } else if let Some((iso, kernel)) = kernel::read_kernel_from_iso_devices(&loader_env)
-        {
-            let modules = kernel::discover_modules_from_iso(&iso);
-            if let Some(status) = handle_kernel_image(kernel, modules, &loader_env, "iso9660") {
-                return status;
+            if !curr.prefer_iso {
+                if let Some((iso, kernel)) = kernel::read_kernel_from_iso_devices(&loader_env) {
+                    let modules = kernel::discover_modules_from_iso(&iso, &mut loader_env);
+                    if let Some(status) =
+                        handle_kernel_image(kernel, modules, &mut loader_env, "iso9660")
+                    {
+                        return status;
+                    }
+                }
             }
-        } else {
             log::warn!("kernel image not found on boot volume");
         }
     } else {

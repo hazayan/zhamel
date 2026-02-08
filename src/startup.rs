@@ -4,9 +4,12 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use uefi::boot::{self, SearchType};
 use uefi::runtime::{self, VariableVendor};
 use uefi::table::cfg::ConfigTableEntry;
 use uefi::CStr16;
+use uefi::proto::console::gop::GraphicsOutput;
+use uefi::Identify;
 use uefi::system;
 
 use crate::env::loader::LoaderEnv;
@@ -15,11 +18,35 @@ pub fn init(loader_env: &mut LoaderEnv) {
     let acpi = detect_acpi(loader_env);
     detect_smbios(loader_env);
     let conout_serial = conout_has_serial().unwrap_or(false);
-    select_console(loader_env, acpi.serial_present || conout_serial);
+    let gop_present = has_gop();
+    log::info!("uefi: gop present={}", gop_present);
+    loader_env.set("zhamel.gop_present", if gop_present { "1" } else { "0" });
+    let trial_val = loader_env.get("zhamel_trial");
+    if trial_val.is_none() && !gop_present {
+        loader_env.set("zhamel_trial", "1");
+        log::warn!("zhamel_trial defaulted to 1 (no GOP detected)");
+    }
+    let trial = matches!(
+        loader_env.get("zhamel_trial"),
+        Some("1") | Some("YES") | Some("yes") | Some("true")
+    );
+    if trial && (acpi.no_vga || !gop_present) {
+        // Ensure a hinted vga0 exists so the disabled hint is applied
+        // before any probe runs.
+        loader_env.set_if_unset("hint.vga.0.at", "isa");
+        loader_env.set_if_unset("hint.vga.0.disabled", "1");
+        log::warn!(
+            "vga: disabling hint.vga.0 (acpi_no_vga={}, gop_present={})",
+            acpi.no_vga,
+            gop_present
+        );
+    }
+    select_console(loader_env, acpi.serial_present || conout_serial, gop_present);
 }
 
 struct AcpiInfo {
     serial_present: bool,
+    no_vga: bool,
 }
 
 fn detect_acpi(loader_env: &mut LoaderEnv) -> AcpiInfo {
@@ -42,12 +69,20 @@ fn detect_acpi(loader_env: &mut LoaderEnv) -> AcpiInfo {
     });
 
     let Some(addr) = acpi_addr else {
-        return AcpiInfo { serial_present: false };
+        return AcpiInfo {
+            serial_present: false,
+            no_vga: false,
+        };
     };
 
     let rsdp = match unsafe { Rsdp::from_ptr(addr.cast()) } {
         Some(rsdp) => rsdp,
-        None => return AcpiInfo { serial_present: false },
+        None => {
+            return AcpiInfo {
+                serial_present: false,
+                no_vga: false,
+            }
+        }
     };
 
     loader_env.set("acpi.rsdp", &format!("0x{:016x}", rsdp.address));
@@ -67,7 +102,15 @@ fn detect_acpi(loader_env: &mut LoaderEnv) -> AcpiInfo {
         .map(|spcr| spcr.serial_port_address != 0)
         .unwrap_or(false);
 
-    AcpiInfo { serial_present }
+    let no_vga = find_acpi_table(&rsdp, *b"FACP")
+        .and_then(|ptr| unsafe { read_fadt_boot_flags(ptr) })
+        .map(|flags| (flags & ACPI_FADT_NO_VGA) != 0)
+        .unwrap_or(false);
+
+    AcpiInfo {
+        serial_present,
+        no_vga,
+    }
 }
 
 fn detect_smbios(loader_env: &mut LoaderEnv) {
@@ -92,17 +135,67 @@ fn detect_smbios(loader_env: &mut LoaderEnv) {
     }
 }
 
-fn select_console(loader_env: &mut LoaderEnv, serial_present: bool) {
+fn select_console(loader_env: &mut LoaderEnv, serial_present: bool, gop_present: bool) {
+    let trial = matches!(
+        loader_env.get("zhamel_trial"),
+        Some("1") | Some("YES") | Some("yes") | Some("true")
+    );
     loader_env.set_if_unset("console", "efi");
 
     let console = loader_env.get("console").unwrap_or("efi");
+    if !gop_present && console == "efi" {
+        let console_value = if trial { "comconsole" } else { "efi,comconsole" };
+        loader_env.set("console", console_value);
+        let howto = if console_value == "comconsole" {
+            RB_SERIAL
+        } else {
+            RB_SERIAL | RB_MULTIPLE
+        };
+        loader_env.set("boot_howto", &howto.to_string());
+        if trial {
+            ensure_serial_hints(loader_env);
+        }
+        return;
+    }
     if serial_present && console == "efi" {
         loader_env.set("console", "efi,comconsole");
         let howto = RB_SERIAL | RB_MULTIPLE;
         loader_env.set("boot_howto", &howto.to_string());
-    } else if loader_env.get("boot_howto").is_none() {
+        if trial {
+            ensure_serial_hints(loader_env);
+        }
+        return;
+    }
+    let console = loader_env
+        .get("console")
+        .unwrap_or("efi")
+        .to_string();
+    if console.contains("comconsole") {
+        if trial {
+            ensure_serial_hints(loader_env);
+        }
+        if loader_env.get("boot_howto").is_none() {
+            let howto = if console.contains("efi") {
+                RB_SERIAL | RB_MULTIPLE
+            } else {
+                RB_SERIAL
+            };
+            loader_env.set("boot_howto", &howto.to_string());
+            return;
+        }
+    }
+    if loader_env.get("boot_howto").is_none() {
         loader_env.set("boot_howto", "0");
     }
+}
+
+fn ensure_serial_hints(loader_env: &mut LoaderEnv) {
+    loader_env.set_if_unset("hw.uart.console", "io:1016,br:115200");
+    loader_env.set_if_unset("hint.uart.0.at", "isa");
+    loader_env.set_if_unset("hint.uart.0.port", "0x3f8");
+    loader_env.set_if_unset("hint.uart.0.irq", "4");
+    loader_env.set_if_unset("hint.uart.0.flags", "0x10");
+    loader_env.set_if_unset("hint.uart.0.baud", "115200");
 }
 
 const RB_SERIAL: u32 = 0x1000;
@@ -249,6 +342,29 @@ unsafe fn read_spcr(ptr: *const SdtHeader) -> Option<SpcrInfo> {
     Some(SpcrInfo {
         serial_port_address: serial.address,
     })
+}
+
+const FADT_BOOTFLAGS_OFFSET: usize = 109;
+const ACPI_FADT_NO_VGA: u16 = 1 << 2;
+
+unsafe fn read_fadt_boot_flags(ptr: *const SdtHeader) -> Option<u16> {
+    if ptr.is_null() {
+        return None;
+    }
+    let header = unsafe { ptr.read_unaligned() };
+    if (header.length as usize) < FADT_BOOTFLAGS_OFFSET + 2 {
+        return None;
+    }
+    let base = ptr as *const u8;
+    let flags_ptr = unsafe { base.add(FADT_BOOTFLAGS_OFFSET).cast::<u16>() };
+    Some(u16::from_le(unsafe { flags_ptr.read_unaligned() }))
+}
+
+fn has_gop() -> bool {
+    match boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID)) {
+        Ok(handles) => !handles.is_empty(),
+        Err(_) => false,
+    }
 }
 
 fn conout_has_serial() -> Option<bool> {

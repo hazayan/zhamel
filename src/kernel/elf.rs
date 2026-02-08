@@ -22,7 +22,11 @@ pub struct ElfLoader;
 #[derive(Debug, Clone)]
 pub struct Elf64Info {
     pub entry: u64,
+    #[allow(dead_code)]
+    pub preload_bootstrap: Option<u64>,
+    pub btext: Option<u64>,
     pub program_headers: Vec<ProgramHeader>,
+    pub section_headers: Vec<SectionHeader>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +50,21 @@ pub struct ProgramHeader {
     pub align: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SectionHeader {
+    pub name: alloc::string::String,
+    #[allow(dead_code)]
+    pub index: usize,
+    pub addr: u64,
+    pub offset: u64,
+    pub size: u64,
+    pub entsize: u64,
+    #[allow(dead_code)]
+    pub flags: u64,
+    pub sh_type: u32,
+    pub link: u32,
+}
+
 impl ElfLoader {
     pub fn parse_kernel(&self, image: &[u8]) -> Result<Elf64Info> {
         let header = parse_elf64_header(image)?;
@@ -56,9 +75,16 @@ impl ElfLoader {
             return Err(BootError::Unsupported("unsupported ELF type"));
         }
         let phdrs = parse_program_headers(image, &header)?;
+        let shdrs = parse_section_headers(image, &header)?;
+        let preload_bootstrap = find_symbol_addr(image, &shdrs, "preload_bootstrap_relocate")
+            .or_else(|| find_symbol_addr(image, &shdrs, "preload_bootstrap"));
+        let btext = find_symbol_addr(image, &shdrs, "btext");
         Ok(Elf64Info {
             entry: header.e_entry,
+            preload_bootstrap,
+            btext,
             program_headers: phdrs,
+            section_headers: shdrs,
         })
     }
 
@@ -120,6 +146,31 @@ impl ElfLoader {
 }
 
 impl Elf64Info {
+    pub fn symbol_addr(&self, image: &[u8], name: &str) -> Option<u64> {
+        find_symbol_addr(image, &self.section_headers, name)
+    }
+
+    pub fn addr_to_offset(&self, base: u64, size: usize, addr: u64) -> Option<u64> {
+        let end = base.checked_add(size as u64)?;
+        for phdr in &self.program_headers {
+            if phdr.p_type != PT_LOAD {
+                continue;
+            }
+            let vbase = phdr.vaddr;
+            let vend = vbase.saturating_add(phdr.memsz);
+            if addr < vbase || addr >= vend {
+                continue;
+            }
+            let pbase = if phdr.paddr != 0 { phdr.paddr } else { phdr.vaddr };
+            let phys = pbase.saturating_add(addr.saturating_sub(vbase));
+            if phys < base || phys >= end {
+                continue;
+            }
+            return Some(phys - base);
+        }
+        None
+    }
+
     pub fn load_range(&self) -> Option<(u64, u64)> {
         let mut min = u64::MAX;
         let mut max = 0u64;
@@ -145,6 +196,13 @@ impl Elf64Info {
             None
         }
     }
+
+    pub fn section_addr(&self, name: &str) -> Option<u64> {
+        self.section_headers
+            .iter()
+            .find(|section| section.name == name)
+            .map(|section| section.addr)
+    }
 }
 
 struct Elf64Header {
@@ -154,6 +212,10 @@ struct Elf64Header {
     e_phoff: u64,
     e_phentsize: u16,
     e_phnum: u16,
+    e_shoff: u64,
+    e_shentsize: u16,
+    e_shnum: u16,
+    e_shstrndx: u16,
 }
 
 fn parse_elf64_header(image: &[u8]) -> Result<Elf64Header> {
@@ -177,8 +239,12 @@ fn parse_elf64_header(image: &[u8]) -> Result<Elf64Header> {
     let e_machine = le_u16(image, 18)?;
     let e_entry = le_u64(image, 24)?;
     let e_phoff = le_u64(image, 32)?;
+    let e_shoff = le_u64(image, 40)?;
     let e_phentsize = le_u16(image, 54)?;
     let e_phnum = le_u16(image, 56)?;
+    let e_shentsize = le_u16(image, 58)?;
+    let e_shnum = le_u16(image, 60)?;
+    let e_shstrndx = le_u16(image, 62)?;
 
     if e_phentsize < 56 {
         return Err(BootError::InvalidData("ELF program header too small"));
@@ -191,6 +257,10 @@ fn parse_elf64_header(image: &[u8]) -> Result<Elf64Header> {
         e_phoff,
         e_phentsize,
         e_phnum,
+        e_shoff,
+        e_shentsize,
+        e_shnum,
+        e_shstrndx,
     })
 }
 
@@ -232,6 +302,176 @@ fn parse_program_header(buf: &[u8]) -> Result<ProgramHeader> {
         memsz: le_u64(buf, 40)?,
         align: le_u64(buf, 48)?,
     })
+}
+
+#[derive(Debug, Clone)]
+struct RawSectionHeader {
+    name_offset: u32,
+    sh_type: u32,
+    flags: u64,
+    addr: u64,
+    offset: u64,
+    size: u64,
+    link: u32,
+    entsize: u64,
+}
+
+fn parse_section_headers(image: &[u8], header: &Elf64Header) -> Result<Vec<SectionHeader>> {
+    if header.e_shnum == 0 || header.e_shentsize < 64 {
+        return Ok(Vec::new());
+    }
+    let shoff = usize::try_from(header.e_shoff)
+        .map_err(|_| BootError::InvalidData("ELF shoff overflow"))?;
+    let entsize = usize::from(header.e_shentsize);
+    let count = usize::from(header.e_shnum);
+    let size = entsize
+        .checked_mul(count)
+        .ok_or(BootError::InvalidData("ELF section header size overflow"))?;
+    let end = shoff
+        .checked_add(size)
+        .ok_or(BootError::InvalidData("ELF section header end overflow"))?;
+    if end > image.len() {
+        return Err(BootError::InvalidData("ELF section headers out of range"));
+    }
+
+    let mut raw = Vec::with_capacity(count);
+    for idx in 0..count {
+        let offset = shoff + idx * entsize;
+        let buf = &image[offset..offset + entsize];
+        raw.push(parse_section_header(buf)?);
+    }
+
+    let shstr_index = usize::from(header.e_shstrndx);
+    let shstr = if shstr_index < raw.len() {
+        let sh = &raw[shstr_index];
+        let start = usize::try_from(sh.offset)
+            .map_err(|_| BootError::InvalidData("ELF shstrtab offset overflow"))?;
+        let end = start
+            .checked_add(usize::try_from(sh.size).map_err(|_| BootError::InvalidData("ELF shstrtab size overflow"))?)
+            .ok_or(BootError::InvalidData("ELF shstrtab end overflow"))?;
+        if end <= image.len() {
+            &image[start..end]
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+
+    let mut sections = Vec::with_capacity(raw.len());
+    for (idx, sh) in raw.into_iter().enumerate() {
+        let name = read_shstr(shstr, sh.name_offset);
+        sections.push(SectionHeader {
+            name,
+            index: idx,
+            addr: sh.addr,
+            offset: sh.offset,
+            size: sh.size,
+            entsize: sh.entsize,
+            flags: sh.flags,
+            sh_type: sh.sh_type,
+            link: sh.link,
+        });
+    }
+
+    Ok(sections)
+}
+
+fn parse_section_header(buf: &[u8]) -> Result<RawSectionHeader> {
+    if buf.len() < 64 {
+        return Err(BootError::InvalidData("ELF section header too short"));
+    }
+    Ok(RawSectionHeader {
+        name_offset: le_u32(buf, 0)?,
+        sh_type: le_u32(buf, 4)?,
+        flags: le_u64(buf, 8)?,
+        addr: le_u64(buf, 16)?,
+        offset: le_u64(buf, 24)?,
+        size: le_u64(buf, 32)?,
+        link: le_u32(buf, 40)?,
+        entsize: le_u64(buf, 56)?,
+    })
+}
+
+fn read_shstr(shstr: &[u8], offset: u32) -> alloc::string::String {
+    let start = offset as usize;
+    if start >= shstr.len() {
+        return alloc::string::String::new();
+    }
+    let mut end = start;
+    while end < shstr.len() && shstr[end] != 0 {
+        end += 1;
+    }
+    alloc::string::String::from_utf8_lossy(&shstr[start..end]).into_owned()
+}
+
+fn find_symbol_addr(image: &[u8], sections: &[SectionHeader], name: &str) -> Option<u64> {
+    const SHT_SYMTAB: u32 = 2;
+    const SHT_STRTAB: u32 = 3;
+    const SYM_ENTRY_SIZE: u64 = 24;
+
+    let name_bytes = name.as_bytes();
+    for section in sections {
+        if section.sh_type != SHT_SYMTAB {
+            continue;
+        }
+        let entsize = if section.entsize == 0 {
+            SYM_ENTRY_SIZE
+        } else {
+            section.entsize
+        };
+        if entsize < SYM_ENTRY_SIZE {
+            continue;
+        }
+        let link = section.link as usize;
+        if link >= sections.len() {
+            continue;
+        }
+        let strtab = &sections[link];
+        if strtab.sh_type != SHT_STRTAB {
+            continue;
+        }
+        let symtab = slice_by_offset(image, section.offset, section.size)?;
+        let strtab_bytes = slice_by_offset(image, strtab.offset, strtab.size)?;
+
+        let mut off = 0u64;
+        while off + entsize <= section.size {
+            let entry = &symtab[off as usize..(off + entsize) as usize];
+            let name_off = le_u32(entry, 0).ok()?;
+            if strtab_eq(strtab_bytes, name_off, name_bytes) {
+                return le_u64(entry, 8).ok();
+            }
+            off = off.saturating_add(entsize);
+        }
+    }
+    None
+}
+
+fn slice_by_offset(image: &[u8], offset: u64, size: u64) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let size = usize::try_from(size).ok()?;
+    let end = start.checked_add(size)?;
+    if end > image.len() {
+        return None;
+    }
+    Some(&image[start..end])
+}
+
+fn strtab_eq(strtab: &[u8], offset: u32, name: &[u8]) -> bool {
+    let start = offset as usize;
+    if start >= strtab.len() {
+        return false;
+    }
+    let mut idx = 0usize;
+    let mut pos = start;
+    while pos < strtab.len() && strtab[pos] != 0 {
+        if idx >= name.len() || strtab[pos] != name[idx] {
+            return false;
+        }
+        idx += 1;
+        pos += 1;
+    }
+    idx == name.len()
 }
 
 fn le_u16(buf: &[u8], offset: usize) -> Result<u16> {

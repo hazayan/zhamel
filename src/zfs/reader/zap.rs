@@ -88,6 +88,7 @@ pub fn zap_list(
     }
 }
 
+#[allow(dead_code)]
 pub fn zap_list_entries(
     block: &BlockIO,
     media_id: u32,
@@ -166,6 +167,7 @@ fn mzap_list(data: &[u8]) -> Result<Vec<String>> {
     Ok(names)
 }
 
+#[allow(dead_code)]
 fn mzap_entries(data: &[u8]) -> Result<Vec<(String, u64)>> {
     let chunks = data.len() / MZAP_ENT_LEN - 1;
     let mut offset = 64usize;
