@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 use uefi::proto::media::block::BlockIO;
 
 use crate::error::{BootError, Result};
+use crate::zfs::label::VDEV_LABEL_START_SIZE;
 use crate::zfs::reader::checksum::verify_checksum;
 use crate::zfs::reader::lz4;
-use crate::zfs::label::VDEV_LABEL_START_SIZE;
-use crate::zfs::reader::types::{bp_should_byteswap, dva_get_asize, dva_get_offset, BlkPtr};
+use crate::zfs::reader::types::{BlkPtr, Dva, bp_should_byteswap, dva_get_asize, dva_get_offset};
 
 const ZIO_COMPRESS_OFF: u64 = 2;
 const ZIO_COMPRESS_LZ4: u64 = 15;
@@ -24,17 +24,55 @@ pub fn read_block(
     if bp.is_embedded() {
         return read_embedded_block(bp);
     }
-    let dva = &bp.dvas[0];
+    let mut last_err = BootError::InvalidData("blkptr DVA size zero");
+    for (dva_idx, dva) in bp.dvas.iter().enumerate() {
+        if dva_is_hole(dva) {
+            continue;
+        }
+        for base in [VDEV_LABEL_START_SIZE as u64, 0] {
+            match read_block_at_dva(block, media_id, block_size, bp, dva, base) {
+                Ok(mut out) => {
+                    if base == 0 {
+                        log::warn!(
+                            "zfs: block checksum ok without label offset dva={} raw_offset=0x{:x}",
+                            dva_idx,
+                            dva_get_offset(dva)
+                        );
+                    }
+                    if bp_should_byteswap(bp) {
+                        byteswap_u64s(&mut out);
+                    }
+                    return Ok(out);
+                }
+                Err(err) => {
+                    last_err = err;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn read_block_at_dva(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    bp: &BlkPtr,
+    dva: &Dva,
+    base: u64,
+) -> Result<Vec<u8>> {
     let asize = dva_get_asize(dva);
     if asize == 0 {
         return Err(BootError::InvalidData("blkptr DVA size zero"));
     }
-    let offset = dva_get_offset(dva) + VDEV_LABEL_START_SIZE as u64;
+    let offset = dva_get_offset(dva)
+        .checked_add(base)
+        .ok_or(BootError::InvalidData("blkptr offset overflow"))?;
     let psize = bp.psize() as usize;
     let lsize = bp.lsize() as usize;
     let raw = read_bytes(block, media_id, block_size, offset, psize)?;
 
-    let mut out = match bp.compress() {
+    match bp.compress() {
         ZIO_COMPRESS_OFF => {
             verify_checksum(bp, &raw)?;
             if lsize <= raw.len() {
@@ -56,13 +94,15 @@ pub fn read_block(
                 }
             }
         }
-        _ => Err(BootError::Unsupported("compression unsupported")),
-    }?;
-
-    if bp_should_byteswap(bp) {
-        byteswap_u64s(&mut out);
+        compression => {
+            log::warn!("zfs: unsupported compression id {}", compression);
+            Err(BootError::Unsupported("compression unsupported"))
+        }
     }
-    Ok(out)
+}
+
+fn dva_is_hole(dva: &Dva) -> bool {
+    dva.word[0] == 0 && dva.word[1] == 0
 }
 
 fn read_embedded_block(bp: &BlkPtr) -> Result<Vec<u8>> {
@@ -88,7 +128,10 @@ fn read_embedded_block(bp: &BlkPtr) -> Result<Vec<u8>> {
             }
         }
         ZIO_COMPRESS_LZ4 => lz4::decompress(&payload, lsize),
-        _ => Err(BootError::Unsupported("embedded blkptr compression")),
+        compression => {
+            log::warn!("zfs: unsupported embedded compression id {}", compression);
+            Err(BootError::Unsupported("embedded blkptr compression"))
+        }
     }
 }
 
@@ -173,7 +216,7 @@ mod tests {
 
     use crate::zfs::reader::types::{BlkPtr, Dva, ZioCksum};
 
-    use super::{read_embedded_block, BP_EMBEDDED_TYPE_DATA, BPE_PAYLOAD_SIZE, ZIO_COMPRESS_OFF};
+    use super::{BP_EMBEDDED_TYPE_DATA, BPE_PAYLOAD_SIZE, ZIO_COMPRESS_OFF, read_embedded_block};
 
     fn build_embedded_bp(payload: &[u8]) -> BlkPtr {
         let lsize = payload.len() as u64;

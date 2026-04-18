@@ -4,9 +4,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use uefi::boot::ScopedProtocol;
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, SearchType};
 use uefi::proto::media::block::BlockIO;
-use uefi::boot::ScopedProtocol;
 use uefi::{Handle, Identify};
 
 use crate::uefi_helpers::device_path::device_path_bytes_for_handle;
@@ -134,8 +134,8 @@ pub fn open_block_io(handle: Handle) -> uefi::Result<ScopedProtocol<BlockIO>> {
         )
     };
     if let Err(err) = &result {
-        let path_text = device_path_text_for_handle(handle)
-            .unwrap_or_else(|| "<unavailable>".to_string());
+        let path_text =
+            device_path_text_for_handle(handle).unwrap_or_else(|| "<unavailable>".to_string());
         let path_len = device_path_bytes_for_handle(handle)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
@@ -179,7 +179,11 @@ fn format_guid_bytes(guid: [u8; 16]) -> String {
 fn strip_end_node(bytes: &[u8]) -> &[u8] {
     if bytes.len() >= 4 {
         let end = bytes.len() - 4;
-        if bytes[end] == 0x7f && bytes[end + 1] == 0xff && bytes[end + 2] == 0x04 && bytes[end + 3] == 0x00 {
+        if bytes[end] == 0x7f
+            && bytes[end + 1] == 0xff
+            && bytes[end + 2] == 0x04
+            && bytes[end + 3] == 0x00
+        {
             return &bytes[..end];
         }
     }

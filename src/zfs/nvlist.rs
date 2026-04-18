@@ -305,7 +305,7 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use super::{NvList, NV_ENCODE_XDR};
+    use super::{NV_ENCODE_XDR, NvList};
 
     fn write_u32_be(buf: &mut Vec<u8>, value: u32) {
         buf.extend_from_slice(&value.to_be_bytes());

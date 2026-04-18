@@ -1,9 +1,9 @@
 extern crate alloc;
 
+use crate::error::{BootError, Result};
+use crate::zfs::reader::dnode::{DnodePhys, dnode_capacity_blocks, dnode_read};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::error::{BootError, Result};
-use crate::zfs::reader::dnode::{dnode_capacity_blocks, dnode_read, DnodePhys};
 use uefi::proto::media::block::BlockIO;
 
 const ZBT_MICRO: u64 = (1u64 << 63) + 3;
@@ -314,8 +314,14 @@ fn fzap_lookup_bytes(
                 continue;
             }
             let table_offset = table_blk << block_shift;
-            let table =
-                dnode_read(block, media_id, block_size, dnode, table_offset, 1usize << block_shift)?;
+            let table = dnode_read(
+                block,
+                media_id,
+                block_size,
+                dnode,
+                table_offset,
+                1usize << block_shift,
+            )?;
             for idx in 0..entries_per_block {
                 let off = (idx * 8) as usize;
                 if off + 8 > table.len() {
@@ -342,7 +348,14 @@ fn fzap_lookup_bytes(
             continue;
         }
         let leaf_offset = blk << block_shift;
-        let leaf = dnode_read(block, media_id, block_size, dnode, leaf_offset, 1usize << block_shift)?;
+        let leaf = dnode_read(
+            block,
+            media_id,
+            block_size,
+            dnode,
+            leaf_offset,
+            1usize << block_shift,
+        )?;
         if leaf.len() < 16 {
             continue;
         }
@@ -490,7 +503,14 @@ fn fzap_entries(
         let entries_per_block = (1u64 << block_shift) / 8;
         for blk in 0..zap.ptrtbl_numblks {
             let table_offset = (zap.ptrtbl_blk + blk) << block_shift;
-            let table = dnode_read(block, media_id, block_size, dnode, table_offset, 1usize << block_shift)?;
+            let table = dnode_read(
+                block,
+                media_id,
+                block_size,
+                dnode,
+                table_offset,
+                1usize << block_shift,
+            )?;
             for idx in 0..entries_per_block {
                 let off = (idx * 8) as usize;
                 if off + 8 > table.len() {
@@ -510,7 +530,14 @@ fn fzap_entries(
     let mut entries = Vec::new();
     for blk in leaf_blocks {
         let leaf_offset = blk << block_shift;
-        let leaf = dnode_read(block, media_id, block_size, dnode, leaf_offset, 1usize << block_shift)?;
+        let leaf = dnode_read(
+            block,
+            media_id,
+            block_size,
+            dnode,
+            leaf_offset,
+            1usize << block_shift,
+        )?;
         if leaf.len() < 16 {
             continue;
         }
@@ -638,7 +665,8 @@ fn read_leaf_string(
 ) -> Result<String> {
     let out = read_leaf_bytes(leaf, block_shift, start_chunk, bytes)?;
     let end = out.iter().position(|b| *b == 0).unwrap_or(out.len());
-    let text = core::str::from_utf8(&out[..end]).map_err(|_| BootError::InvalidData("leaf array utf8"))?;
+    let text =
+        core::str::from_utf8(&out[..end]).map_err(|_| BootError::InvalidData("leaf array utf8"))?;
     Ok(text.to_string())
 }
 
@@ -681,10 +709,10 @@ fn parse_mzap_entry(bytes: &[u8]) -> Result<MzapEntPhys> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
-    use super::normalize_zap_value;
     use super::mzap_lookup;
-    use super::{parse_leaf_entries, CHAIN_END, ZAP_LEAF_CHUNKSIZE, ZAP_LEAF_MAGIC, ZBT_LEAF};
+    use super::normalize_zap_value;
+    use super::{CHAIN_END, ZAP_LEAF_CHUNKSIZE, ZAP_LEAF_MAGIC, ZBT_LEAF, parse_leaf_entries};
+    use alloc::vec;
 
     #[test]
     fn mzap_lookup_basic() {

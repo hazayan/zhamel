@@ -3,26 +3,26 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use uefi::CString16;
+use uefi::Handle;
 use uefi::boot;
 use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
 use uefi::fs::FileSystem;
 use uefi::fs::Path;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::CString16;
-use uefi::Handle;
 
 use crate::fs::ufs;
 use crate::gpt;
 use crate::uefi_helpers::block_io::{
     find_block_handle_by_device_path_exact, find_block_handle_by_device_path_prefix, open_block_io,
 };
-use crate::uefi_helpers::enumerate_block_devices;
-use crate::uefi_helpers::find_partition_handle_by_guid;
 use crate::uefi_helpers::device_path::{
     device_path_bytes_for_handle, device_path_prefix_before_file_path,
     device_path_prefix_before_hard_drive,
 };
+use crate::uefi_helpers::enumerate_block_devices;
+use crate::uefi_helpers::find_partition_handle_by_guid;
 
 #[derive(Clone, Copy)]
 struct UfsPartitionTarget {
@@ -157,7 +157,14 @@ pub fn read_file_from_boot_volume_into(path: &str, dst: *mut u8, size: usize) ->
         return None;
     }
     let part = ensure_boot_ufs_partition()?;
-    ufs::read_file_from_partition_into(part.handle, part.first_lba, part.last_lba, path_str, dst, size)
+    ufs::read_file_from_partition_into(
+        part.handle,
+        part.first_lba,
+        part.last_lba,
+        path_str,
+        dst,
+        size,
+    )
 }
 
 pub fn read_file_from_any_fs(path: &str) -> Option<Vec<u8>> {
@@ -218,10 +225,7 @@ pub fn normalize_uefi_path(path: &str) -> String {
     out
 }
 
-pub fn read_dir_entries_from_partition_guid(
-    guid: [u8; 16],
-    path: &str,
-) -> Option<Vec<String>> {
+pub fn read_dir_entries_from_partition_guid(guid: [u8; 16], path: &str) -> Option<Vec<String>> {
     if let Some(handle) = find_partition_handle_by_guid(guid) {
         if let Some(entries) = read_dir_entries_from_handle(handle, path) {
             return Some(entries);
@@ -251,8 +255,12 @@ pub fn read_dir_entries_from_boot_volume(path: &str) -> Option<Vec<String>> {
     };
     let path: CString16 = CString16::try_from(path_str).ok()?;
     if let Some(part) = ufs_part {
-        let entries =
-            ufs::read_dir_entries_from_partition(part.handle, part.first_lba, part.last_lba, path_str);
+        let entries = ufs::read_dir_entries_from_partition(
+            part.handle,
+            part.first_lba,
+            part.last_lba,
+            path_str,
+        );
         if entries.is_none() {
             log::warn!("boot volume ufs dir read failed: {}", path_str);
         }
@@ -306,7 +314,10 @@ fn open_boot_volume() -> Option<FileSystem> {
     match boot::get_image_file_system(boot::image_handle()) {
         Ok(fs) => return Some(FileSystem::new(fs)),
         Err(err) => {
-            log::warn!("boot volume get_image_file_system failed: {:?}", err.status());
+            log::warn!(
+                "boot volume get_image_file_system failed: {:?}",
+                err.status()
+            );
         }
     }
     if let Some(handle) = find_boot_fs_handle_from_image_path() {
@@ -561,7 +572,8 @@ fn cache_boot_ufs_partition(part: UfsPartitionTarget) {
 }
 
 static mut BOOT_FS_DEVICE: Option<uefi::Handle> = None;
-static mut BOOT_UFS_PARTITION: Option<UfsPartitionTarget> = None;fn open_simple_fs(handle: Handle) -> uefi::Result<FileSystem> {
+static mut BOOT_UFS_PARTITION: Option<UfsPartitionTarget> = None;
+fn open_simple_fs(handle: Handle) -> uefi::Result<FileSystem> {
     let fs = unsafe {
         boot::open_protocol::<SimpleFileSystem>(
             OpenProtocolParams {

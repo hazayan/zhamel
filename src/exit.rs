@@ -1,9 +1,9 @@
 use core::ptr;
 
+use uefi::Status;
 use uefi::boot;
 use uefi::runtime::{self, ResetType};
 use uefi::table;
-use uefi::Status;
 
 use crate::heap;
 

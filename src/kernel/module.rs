@@ -13,6 +13,9 @@ pub struct Module {
     pub phys_addr: Option<u64>,
     pub args: Option<String>,
     pub data_len: usize,
+    pub elf_header: Option<[u8; 64]>,
+    pub section_headers: Vec<u8>,
+    pub section_addr_offsets: Vec<Option<u64>>,
 }
 
 impl Module {
@@ -25,6 +28,9 @@ impl Module {
             phys_addr: None,
             args: None,
             data_len,
+            elf_header: None,
+            section_headers: Vec::new(),
+            section_addr_offsets: Vec::new(),
         }
     }
 
@@ -43,6 +49,9 @@ impl Module {
             phys_addr: None,
             args,
             data_len,
+            elf_header: None,
+            section_headers: Vec::new(),
+            section_addr_offsets: Vec::new(),
         }
     }
 
@@ -60,6 +69,9 @@ impl Module {
             phys_addr: Some(phys_addr),
             args,
             data_len,
+            elf_header: None,
+            section_headers: Vec::new(),
+            section_addr_offsets: Vec::new(),
         }
     }
 
@@ -74,5 +86,16 @@ impl Module {
     #[allow(dead_code)]
     pub fn set_data_len(&mut self, len: usize) {
         self.data_len = len;
+    }
+
+    pub fn set_elf_metadata(
+        &mut self,
+        elf_header: [u8; 64],
+        section_headers: Vec<u8>,
+        section_addr_offsets: Vec<Option<u64>>,
+    ) {
+        self.elf_header = Some(elf_header);
+        self.section_headers = section_headers;
+        self.section_addr_offsets = section_addr_offsets;
     }
 }

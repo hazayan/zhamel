@@ -3,22 +3,20 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use uefi::runtime::{self, VariableVendor};
 use core::cell::UnsafeCell;
 use uefi::CStr16;
 use uefi::Guid;
+use uefi::runtime::{self, VariableVendor};
 
 use crate::env::loader::LoaderEnv;
 use crate::error::{BootError, Result};
 use crate::zfs::sha256::Sha256;
 
 const EFI_CERT_SHA256_GUID: Guid = Guid::from_bytes([
-    0x26, 0x16, 0xC4, 0xC1, 0x4C, 0x50, 0x92, 0x40, 0xAC, 0xA9, 0x41, 0xF9, 0x36, 0x93,
-    0x43, 0x28,
+    0x26, 0x16, 0xC4, 0xC1, 0x4C, 0x50, 0x92, 0x40, 0xAC, 0xA9, 0x41, 0xF9, 0x36, 0x93, 0x43, 0x28,
 ]);
 const EFI_IMAGE_SECURITY_DATABASE_GUID: Guid = Guid::from_bytes([
-    0xCB, 0xB2, 0x19, 0xD7, 0x3A, 0x3D, 0x96, 0x45, 0xA3, 0xBC, 0xDA, 0xD0, 0x0E, 0x67,
-    0x65, 0x6F,
+    0xCB, 0xB2, 0x19, 0xD7, 0x3A, 0x3D, 0x96, 0x45, 0xA3, 0xBC, 0xDA, 0xD0, 0x0E, 0x67, 0x65, 0x6F,
 ]);
 
 struct SecureBootCell(UnsafeCell<Option<SecureBootState>>);
@@ -40,7 +38,11 @@ struct Manifest {
     entries: Vec<(String, [u8; 32])>,
 }
 
-pub fn init(loader_env: &mut LoaderEnv, manifest_bytes: Option<Vec<u8>>, manifest_path: Option<&str>) {
+pub fn init(
+    loader_env: &mut LoaderEnv,
+    manifest_bytes: Option<Vec<u8>>,
+    manifest_path: Option<&str>,
+) {
     let forced = matches!(
         loader_env.get("secureboot_force"),
         Some("1") | Some("YES") | Some("yes") | Some("true")
@@ -56,7 +58,11 @@ pub fn init(loader_env: &mut LoaderEnv, manifest_bytes: Option<Vec<u8>>, manifes
         log::info!(
             "secureboot: manifest path {} (bytes={})",
             path,
-            if manifest_bytes.is_some() { "yes" } else { "no" }
+            if manifest_bytes.is_some() {
+                "yes"
+            } else {
+                "no"
+            }
         );
     }
     if !enabled {
@@ -160,12 +166,12 @@ fn parse_signature_list(data: &[u8]) -> Vec<[u8; 32]> {
     let mut offset = 0usize;
     while offset + 28 <= data.len() {
         let sig_type = &data[offset..offset + 16];
-        let list_size = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap())
-            as usize;
-        let header_size = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap())
-            as usize;
-        let sig_size = u32::from_le_bytes(data[offset + 24..offset + 28].try_into().unwrap())
-            as usize;
+        let list_size =
+            u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap()) as usize;
+        let header_size =
+            u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap()) as usize;
+        let sig_size =
+            u32::from_le_bytes(data[offset + 24..offset + 28].try_into().unwrap()) as usize;
         if list_size < 28 || sig_size < 16 || offset + list_size > data.len() {
             break;
         }
@@ -207,8 +213,12 @@ fn parse_manifest(_path: &str, bytes: &[u8]) -> Result<Manifest> {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let hash_hex = parts.next().ok_or(BootError::InvalidData("manifest line"))?;
-        let entry_path = parts.next().ok_or(BootError::InvalidData("manifest line"))?;
+        let hash_hex = parts
+            .next()
+            .ok_or(BootError::InvalidData("manifest line"))?;
+        let entry_path = parts
+            .next()
+            .ok_or(BootError::InvalidData("manifest line"))?;
         let hash = parse_hex_hash(hash_hex)?;
         entries.push((entry_path.to_string(), hash));
     }
@@ -288,8 +298,9 @@ mod tests {
 
     #[test]
     fn parse_hex_hash_ok() {
-        let hash = parse_hex_hash("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-            .expect("hash");
+        let hash =
+            parse_hex_hash("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+                .expect("hash");
         assert_eq!(hash, [0xffu8; 32]);
     }
 }

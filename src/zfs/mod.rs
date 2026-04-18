@@ -4,22 +4,33 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use uefi::boot;
-use uefi::proto::media::block::BlockIO;
-
 use crate::env::loader::LoaderEnv;
 use crate::error::{BootError, Result};
+use crate::kernel::module::Module;
+use crate::kernel::types::ModuleType;
 use crate::uefi_helpers::BlockDeviceInfo;
+use crate::uefi_helpers::block_io::open_block_io;
+use crate::uefi_helpers::device_path::{device_path_text_for_handle, partition_guid_for_handle};
 use crate::zfs::fs::DatasetProps;
+use crate::zfs::unlock::KeyLocation;
 
+pub mod fs;
 mod label;
-pub mod sha256;
 pub mod nvlist;
 pub mod reader;
-pub mod fs;
+pub mod sha256;
 mod unlock;
 
 pub use label::BootEnv;
+
+const ZHAMEL_ZFSKEY_MODULE: &str = "zhamel_zfskey";
+const ZHAMEL_ZFSKEY_PRELOAD_TYPE: &str = "zhamel_zfs_key";
+const ZFS_MODULE: &str = "zfs";
+const ZFS_ROOT_DEPENDENCY_MODULES: &[&str] = &["opensolaris", "xdr", "acl_nfs4", "crypto", "zlib"];
+const ZHAMEL_ZFSKEY_MAGIC: &[u8; 8] = b"ZHMZKEY\0";
+const ZHAMEL_ZFSKEY_VERSION: u32 = 1;
+const ZHAMEL_ZFSKEY_WKEY_LEN: usize = 32;
+const ZHAMEL_ZFSKEY_HEADER_LEN: usize = 40;
 
 #[derive(Debug, Clone)]
 pub struct ZfsPool {
@@ -39,11 +50,17 @@ pub struct ZfsPool {
 
 pub fn probe_pools(devices: &[BlockDeviceInfo]) -> Vec<ZfsPool> {
     let mut pools = Vec::new();
-    for device in devices {
-        let block = match boot::open_protocol_exclusive::<BlockIO>(device.handle) {
+    for (idx, device) in devices.iter().enumerate() {
+        log_zfs_probe_candidate(idx, device);
+        let block = match open_block_io(device.handle) {
             Ok(block) => block,
             Err(err) => {
-                log::warn!("zfs: BlockIO open failed: {:?}", err.status());
+                log::warn!(
+                    "zfs: BlockIO open failed: {:?} idx={} handle={:p}",
+                    err.status(),
+                    idx,
+                    device.handle.as_ptr()
+                );
                 continue;
             }
         };
@@ -55,7 +72,14 @@ pub fn probe_pools(devices: &[BlockDeviceInfo]) -> Vec<ZfsPool> {
         ) {
             Ok(labels) => labels,
             Err(err) => {
-                log::warn!("zfs: label probe failed: {}", err);
+                log::warn!(
+                    "zfs: label probe failed: {} idx={} logical={} last_block={} block_size={}",
+                    err,
+                    idx,
+                    device.logical_partition,
+                    device.last_block,
+                    device.block_size
+                );
                 continue;
             }
         };
@@ -74,9 +98,20 @@ pub fn probe_pools(devices: &[BlockDeviceInfo]) -> Vec<ZfsPool> {
             device.block_size as usize,
             device.last_block,
             best.ashift,
-        )
-        .ok()
-        .flatten();
+        );
+        let uber = match uber {
+            Ok(uber) => uber,
+            Err(err) => {
+                log::warn!(
+                    "zfs: uberblock probe failed: {} idx={} pool={} txg={}",
+                    err,
+                    idx,
+                    best.pool_guid,
+                    best.pool_txg
+                );
+                None
+            }
+        };
         let bootenvs = if let Some(uber) = uber.as_ref() {
             match reader::mos::list_bootenvs(
                 &block,
@@ -105,6 +140,15 @@ pub fn probe_pools(devices: &[BlockDeviceInfo]) -> Vec<ZfsPool> {
                 None
             }
         };
+        log::info!(
+            "zfs: pool found idx={} guid={} txg={} name={:?} ashift={:?} uber={}",
+            idx,
+            best.pool_guid,
+            best.pool_txg,
+            best.pool_name,
+            best.ashift,
+            uber.is_some()
+        );
         pools.push(ZfsPool {
             guid: best.pool_guid,
             txg: best.pool_txg,
@@ -119,6 +163,49 @@ pub fn probe_pools(devices: &[BlockDeviceInfo]) -> Vec<ZfsPool> {
         });
     }
     pools
+}
+
+fn log_zfs_probe_candidate(idx: usize, device: &BlockDeviceInfo) {
+    let guid = partition_guid_for_handle(device.handle)
+        .map(format_guid)
+        .unwrap_or_else(|| "<none>".to_string());
+    let path =
+        device_path_text_for_handle(device.handle).unwrap_or_else(|| "<unavailable>".to_string());
+    log::info!(
+        "zfs: probe candidate idx={} handle={:p} logical={} media_id={} block_size={} last_block={} removable={} readonly={} guid={} path={}",
+        idx,
+        device.handle.as_ptr(),
+        device.logical_partition,
+        device.media_id,
+        device.block_size,
+        device.last_block,
+        device.removable,
+        device.read_only,
+        guid,
+        path
+    );
+}
+
+fn format_guid(guid: [u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        guid[3],
+        guid[2],
+        guid[1],
+        guid[0],
+        guid[5],
+        guid[4],
+        guid[7],
+        guid[6],
+        guid[8],
+        guid[9],
+        guid[10],
+        guid[11],
+        guid[12],
+        guid[13],
+        guid[14],
+        guid[15]
+    )
 }
 
 pub fn log_bootenv(pools: &[ZfsPool]) {
@@ -150,11 +237,7 @@ pub fn log_bootenv(pools: &[ZfsPool]) {
                 );
             }
         } else {
-            log::info!(
-                "zfs: pool {} txg={} bootenv missing",
-                pool.guid,
-                txg
-            );
+            log::info!("zfs: pool {} txg={} bootenv missing", pool.guid, txg);
         }
     }
 }
@@ -183,7 +266,10 @@ pub fn find_pool_for_bootenv<'a>(
     let first = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("");
     if !rest.is_empty() {
-        if let Some(pool) = pools.iter().find(|pool| pool.name.as_deref() == Some(first)) {
+        if let Some(pool) = pools
+            .iter()
+            .find(|pool| pool.name.as_deref() == Some(first))
+        {
             return Some((pool, rest.to_string()));
         }
     }
@@ -272,17 +358,14 @@ pub fn validate_bootenv(pools: &[ZfsPool]) -> Result<()> {
 }
 
 pub fn maybe_unlock_kunci(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result<()> {
-    let bootenv = env
-        .get("zfs_be_active")
-        .or_else(|| env.get("zfs_bootonce"));
-    let Some(bootenv) = bootenv else {
+    let Some(target) = unlock_dataset_target(env) else {
         return Ok(());
     };
-    let Some((pool, bootenv_path)) = find_pool_for_bootenv(pools, bootenv) else {
+    let Some((pool, dataset_path)) = find_pool_for_bootenv(pools, &target) else {
+        log::warn!("zfs: unlock target not found: {}", target);
         return Ok(());
     };
-    let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
-        .map_err(|err| BootError::Uefi(err.status()))?;
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
     let uber = pool
         .uber
         .ok_or(BootError::InvalidData("uberblock missing"))?;
@@ -291,7 +374,7 @@ pub fn maybe_unlock_kunci(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result<()> 
         pool.media_id,
         pool.block_size,
         uber,
-        &bootenv_path,
+        &dataset_path,
     ) {
         Ok(props) => props,
         Err(err) => {
@@ -299,6 +382,14 @@ pub fn maybe_unlock_kunci(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result<()> 
             return Ok(());
         }
     };
+    log::info!(
+        "zfs: dataset props keyformat={:?} keylocation={:?} kunci_jwe={} pbkdf2_salt={} pbkdf2_iters={:?}",
+        props.keyformat,
+        props.keylocation,
+        props.kunci_jwe.is_some(),
+        props.pbkdf2_salt.is_some(),
+        props.pbkdf2_iters
+    );
     if props.kunci_jwe.is_none() {
         return Ok(());
     }
@@ -306,10 +397,7 @@ pub fn maybe_unlock_kunci(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result<()> 
 }
 
 pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result<()> {
-    let bootenv = env
-        .get("zfs_be_active")
-        .or_else(|| env.get("zfs_bootonce"));
-    let Some(bootenv) = bootenv else {
+    let Some(target) = unlock_dataset_target(env) else {
         return Ok(());
     };
     if let Some(keyformat) = env.get("zfs_keyformat") {
@@ -318,16 +406,18 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
             keyformat: Some(keyformat.to_string()),
             keylocation,
             kunci_jwe: None,
+            pbkdf2_salt: None,
+            pbkdf2_iters: None,
         };
         log::info!("zfs: using keyformat/keylocation override from env");
         if !needs_passphrase(&props) {
             return Ok(());
         }
-        let Some((pool, _)) = find_pool_for_bootenv(pools, bootenv) else {
+        let Some((pool, _)) = find_pool_for_bootenv(pools, &target) else {
+            log::warn!("zfs: unlock target not found: {}", target);
             return Ok(());
         };
-        let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
-            .map_err(|err| BootError::Uefi(err.status()))?;
+        let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
         let uber = pool
             .uber
             .ok_or(BootError::InvalidData("uberblock missing"))?;
@@ -341,11 +431,11 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
             &bootfs_objset,
         );
     }
-    let Some((pool, bootenv_path)) = find_pool_for_bootenv(pools, bootenv) else {
+    let Some((pool, dataset_path)) = find_pool_for_bootenv(pools, &target) else {
+        log::warn!("zfs: unlock target not found: {}", target);
         return Ok(());
     };
-    let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
-        .map_err(|err| BootError::Uefi(err.status()))?;
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
     let uber = pool
         .uber
         .ok_or(BootError::InvalidData("uberblock missing"))?;
@@ -354,7 +444,7 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
         pool.media_id,
         pool.block_size,
         uber,
-        &bootenv_path,
+        &dataset_path,
     ) {
         Ok(props) => props,
         Err(err) => {
@@ -363,14 +453,16 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
         }
     };
     log::info!(
-        "zfs: dataset props keyformat={:?} keylocation={:?}",
+        "zfs: dataset props keyformat={:?} keylocation={:?} pbkdf2_salt={} pbkdf2_iters={:?}",
         props.keyformat,
-        props.keylocation
+        props.keylocation,
+        props.pbkdf2_salt.is_some(),
+        props.pbkdf2_iters
     );
     if !needs_passphrase(&props) {
         return Ok(());
     }
-    log::info!("zfs: passphrase required for {}", bootenv_path);
+    log::info!("zfs: passphrase required for {}", dataset_path);
     let bootfs_objset = fs::bootfs_objset(&block, pool.media_id, pool.block_size, uber)?;
     unlock::maybe_prompt_passphrase(
         env,
@@ -380,6 +472,333 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
         pool.block_size,
         &bootfs_objset,
     )
+}
+
+pub fn maybe_prepare_zfskey_handoff(
+    pools: &[ZfsPool],
+    env: &mut LoaderEnv,
+) -> Result<Option<Module>> {
+    let Some(target) = unlock_dataset_target(env) else {
+        return Ok(None);
+    };
+    enable_zfs_root_module(env);
+    let Some((pool, dataset_path)) = find_pool_for_bootenv(pools, &target) else {
+        log::warn!("zfs: zfskey handoff target not found: {}", target);
+        return Ok(None);
+    };
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
+    let uber = pool
+        .uber
+        .ok_or(BootError::InvalidData("uberblock missing"))?;
+    let props = match fs::bootenv_dataset_props(
+        &block,
+        pool.media_id,
+        pool.block_size,
+        uber,
+        &dataset_path,
+    ) {
+        Ok(props) => props,
+        Err(err) => {
+            log::warn!("zfs: zfskey dataset props lookup failed: {}", err);
+            return Ok(None);
+        }
+    };
+
+    let key = match zfskey_handoff_key(env, &props, &block, pool, uber)? {
+        Some(key) => key,
+        None => return Ok(None),
+    };
+    let payload = build_zfskey_handoff_payload(&target, &key)?;
+    enable_zfskey_helper_module(env);
+    core::mem::forget(block);
+    log::info!("zfs: native key handoff BlockIO retained");
+    log::info!(
+        "zfs: prepared native key handoff for {} (payload_len={})",
+        target,
+        payload.len()
+    );
+    let module = Module::new(
+        ZHAMEL_ZFSKEY_PRELOAD_TYPE.to_string(),
+        ModuleType::Raw(ZHAMEL_ZFSKEY_PRELOAD_TYPE.to_string()),
+        payload,
+    );
+    log::info!("zfs: native key handoff module object created");
+    Ok(Some(module))
+}
+
+fn enable_zfs_root_module(env: &mut LoaderEnv) {
+    for module in ZFS_ROOT_DEPENDENCY_MODULES {
+        enable_optional_kld_module(env, module);
+    }
+    env.set_if_unset("zfs_load", "YES");
+    env.set_if_unset("zfs_name", ZFS_MODULE);
+    env.set_if_unset("zfs_type", "kld");
+    log::info!(
+        "zfs: enabled zfs root module load={:?} name={:?} type={:?}",
+        env.get("zfs_load"),
+        env.get("zfs_name"),
+        env.get("zfs_type")
+    );
+}
+
+fn enable_optional_kld_module(env: &mut LoaderEnv, module: &str) {
+    env.set_if_unset(&format!("{}_load", module), "YES");
+    env.set_if_unset(&format!("{}_name", module), module);
+    env.set_if_unset(&format!("{}_type", module), "kld");
+    env.set_if_unset(
+        &format!("{}_loaderror", module),
+        &format!("echo zfs: optional dependency {}.ko not found", module),
+    );
+}
+
+fn zfskey_handoff_key(
+    env: &LoaderEnv,
+    props: &DatasetProps,
+    block: &uefi::proto::media::block::BlockIO,
+    pool: &ZfsPool,
+    uber: reader::types::Uberblock,
+) -> Result<Option<Vec<u8>>> {
+    if let Some(jwe) = props.kunci_jwe.as_deref() {
+        log::info!("zfs: decrypting kunci key for native handoff");
+        let url_override = env.get("zfs_kunci_url");
+        let http_driver = env.get("zfs_kunci_http_driver");
+        let local_ip = env.get("zfs_kunci_ip").and_then(parse_ipv4_env);
+        let netmask = env.get("zfs_kunci_netmask").and_then(parse_ipv4_env);
+        let key = crate::tang::decrypt_tang_jwe(jwe, url_override, http_driver, local_ip, netmask)?;
+        validate_zfskey_len(&key)?;
+        return Ok(Some(key));
+    }
+
+    if !matches!(
+        props.keyformat.as_deref(),
+        Some(format) if format.eq_ignore_ascii_case("raw")
+    ) {
+        return Ok(None);
+    }
+
+    let Some(keylocation) = props.keylocation.as_deref() else {
+        log::warn!("zfs: raw keyformat has no keylocation for native handoff");
+        return Ok(None);
+    };
+    let KeyLocation::File(path) = unlock::parse_keylocation(keylocation) else {
+        log::warn!("zfs: raw keylocation unsupported for native handoff");
+        return Ok(None);
+    };
+    match read_raw_keylocation_file(block, pool, uber, &path) {
+        Ok(key) => {
+            validate_zfskey_len(&key)?;
+            Ok(Some(key))
+        }
+        Err(err) => {
+            log::warn!("zfs: raw keylocation file read failed for handoff: {}", err);
+            Ok(None)
+        }
+    }
+}
+
+fn read_raw_keylocation_file(
+    block: &uefi::proto::media::block::BlockIO,
+    pool: &ZfsPool,
+    uber: reader::types::Uberblock,
+    path: &str,
+) -> Result<Vec<u8>> {
+    match fs::datasets_for_mountpoint(pool, "/boot") {
+        Ok(datasets) => {
+            for dataset in datasets {
+                for dataset_path in paths_for_boot_dataset(path) {
+                    match fs::read_file_from_bootenv(pool, &dataset, &dataset_path) {
+                        Ok(bytes) => {
+                            log::info!(
+                                "zfs: raw keylocation read from /boot dataset {} path {}",
+                                dataset,
+                                dataset_path
+                            );
+                            return Ok(bytes);
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "zfs: raw keylocation /boot dataset read failed: dataset={} path={} err={}",
+                                dataset,
+                                dataset_path,
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            log::warn!("zfs: raw keylocation /boot dataset lookup failed: {}", err);
+        }
+    }
+
+    let bootfs_objset = fs::bootfs_objset(block, pool.media_id, pool.block_size, uber)?;
+    for bootfs_path in paths_for_boot_dataset(path) {
+        match fs::read_file_from_objset(
+            block,
+            pool.media_id,
+            pool.block_size,
+            &bootfs_objset,
+            &bootfs_path,
+        ) {
+            Ok(bytes) => {
+                log::info!("zfs: raw keylocation read from bootfs path {}", bootfs_path);
+                return Ok(bytes);
+            }
+            Err(err) => {
+                log::warn!(
+                    "zfs: raw keylocation bootfs read failed: path={} err={}",
+                    bootfs_path,
+                    err
+                );
+            }
+        }
+    }
+    Err(BootError::InvalidData("zfs raw keylocation file missing"))
+}
+
+fn paths_for_boot_dataset(path: &str) -> Vec<String> {
+    let primary = path_for_boot_dataset(path);
+    let fallback = normalize_zfs_path(path);
+    if primary == fallback {
+        let mut out = Vec::new();
+        out.push(primary);
+        out
+    } else {
+        let mut out = Vec::new();
+        out.push(primary);
+        out.push(fallback);
+        out
+    }
+}
+
+fn path_for_boot_dataset(path: &str) -> String {
+    let normalized = normalize_zfs_path(path);
+    if normalized == "/boot" {
+        return "/".to_string();
+    }
+    if let Some(stripped) = normalized.strip_prefix("/boot/") {
+        return format!("/{}", stripped);
+    }
+    normalized
+}
+
+fn normalize_zfs_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+fn validate_zfskey_len(key: &[u8]) -> Result<()> {
+    if key.len() == ZHAMEL_ZFSKEY_WKEY_LEN {
+        Ok(())
+    } else {
+        Err(BootError::InvalidData(
+            "zfs raw key must be exactly 32 bytes",
+        ))
+    }
+}
+
+fn build_zfskey_handoff_payload(dataset: &str, key: &[u8]) -> Result<Vec<u8>> {
+    validate_zfskey_len(key)?;
+    if dataset.as_bytes().contains(&0) {
+        return Err(BootError::InvalidData("zfs dataset contains nul byte"));
+    }
+    let dataset_len = dataset.len() + 1;
+    let mut payload = Vec::with_capacity(ZHAMEL_ZFSKEY_HEADER_LEN + dataset_len + key.len());
+    payload.extend_from_slice(ZHAMEL_ZFSKEY_MAGIC);
+    payload.extend_from_slice(&ZHAMEL_ZFSKEY_VERSION.to_le_bytes());
+    payload.extend_from_slice(&(ZHAMEL_ZFSKEY_HEADER_LEN as u32).to_le_bytes());
+    payload.extend_from_slice(&(dataset_len as u32).to_le_bytes());
+    payload.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&[0u8; 12]);
+    payload.extend_from_slice(dataset.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(key);
+    Ok(payload)
+}
+
+fn enable_zfskey_helper_module(env: &mut LoaderEnv) {
+    env.set_if_unset("zhamel_zfskey_load", "YES");
+    env.set_if_unset("zhamel_zfskey_name", ZHAMEL_ZFSKEY_MODULE);
+    env.set_if_unset("zhamel_zfskey_type", "kld");
+    append_module_path(env, "/boot/modules");
+    log::info!(
+        "zfs: enabled zfskey helper load={:?} name={:?} type={:?} module_path={:?}",
+        env.get("zhamel_zfskey_load"),
+        env.get("zhamel_zfskey_name"),
+        env.get("zhamel_zfskey_type"),
+        env.get("module_path")
+    );
+}
+
+fn append_module_path(env: &mut LoaderEnv, entry: &str) {
+    let current = env.get("module_path").unwrap_or("/boot/kernel").to_string();
+    if module_path_contains(&current, entry) {
+        return;
+    }
+    let updated = if current.trim().is_empty() {
+        entry.to_string()
+    } else {
+        format!("{};{}", current, entry)
+    };
+    env.set("module_path", &updated);
+}
+
+fn module_path_contains(path_list: &str, entry: &str) -> bool {
+    let target = entry.trim_end_matches('/');
+    path_list
+        .split(';')
+        .map(str::trim)
+        .any(|path| path.trim_end_matches('/') == target)
+}
+
+fn parse_ipv4_env(value: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut idx = 0usize;
+    for part in value.split('.') {
+        if idx >= out.len() {
+            return None;
+        }
+        out[idx] = part.trim().parse::<u8>().ok()?;
+        idx += 1;
+    }
+    if idx == out.len() { Some(out) } else { None }
+}
+
+fn unlock_dataset_target(env: &LoaderEnv) -> Option<String> {
+    if let Some(root) = env
+        .get("vfs.root.mountfrom")
+        .and_then(root_dataset_from_mountfrom)
+    {
+        log::info!("zfs: unlock target from vfs.root.mountfrom: {}", root);
+        return Some(root);
+    }
+    env.get("zfs_be_active")
+        .or_else(|| env.get("zfs_bootonce"))
+        .map(ToString::to_string)
+}
+
+fn root_dataset_from_mountfrom(value: &str) -> Option<String> {
+    let rest = value.trim().strip_prefix("zfs:")?;
+    let dataset = rest
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches(':');
+    if dataset.is_empty() {
+        None
+    } else {
+        Some(dataset.to_string())
+    }
 }
 
 fn needs_passphrase(props: &DatasetProps) -> bool {
@@ -401,9 +820,15 @@ mod tests {
 
     use crate::env::loader::LoaderEnv;
     use crate::env::parser::EnvVar;
-    use crate::zfs::{apply_bootonce_selection, export_bootenv_list, split_bootenv, BootEnv, ZfsPool};
+    use crate::zfs::{
+        BootEnv, ZfsPool, apply_bootonce_selection, export_bootenv_list,
+        root_dataset_from_mountfrom, split_bootenv, unlock_dataset_target,
+    };
 
-    use super::{export_env, find_pool_for_bootenv};
+    use super::{
+        ZHAMEL_ZFSKEY_HEADER_LEN, ZHAMEL_ZFSKEY_MAGIC, build_zfskey_handoff_payload, export_env,
+        find_pool_for_bootenv, paths_for_boot_dataset,
+    };
 
     #[test]
     fn export_env_single_pool() {
@@ -560,5 +985,72 @@ mod tests {
         let (pool, dataset) = find_pool_for_bootenv(&pools, "ROOT/default").expect("pool");
         assert_eq!(pool.guid, 2);
         assert_eq!(dataset, "ROOT/default");
+    }
+
+    #[test]
+    fn root_dataset_from_mountfrom_parses_zfs_root() {
+        assert_eq!(
+            root_dataset_from_mountfrom("zfs:zroot-waka/zung/system"),
+            Some("zroot-waka/zung/system".to_string())
+        );
+        assert_eq!(
+            root_dataset_from_mountfrom("zfs:zroot/ROOT/default ro"),
+            Some("zroot/ROOT/default".to_string())
+        );
+        assert_eq!(root_dataset_from_mountfrom("ufs:/dev/ada0p2"), None);
+    }
+
+    #[test]
+    fn unlock_dataset_target_prefers_root_mountfrom() {
+        let mut env = LoaderEnv {
+            env_vars: Vec::new(),
+            conf_vars: Vec::new(),
+        };
+        env.set("zfs_be_active", "zfs:zroot/ROOT/default:");
+        env.set("vfs.root.mountfrom", "zfs:zroot-waka/zung/system");
+
+        assert_eq!(
+            unlock_dataset_target(&env),
+            Some("zroot-waka/zung/system".to_string())
+        );
+    }
+
+    #[test]
+    fn zfskey_payload_matches_kernel_module_header() {
+        let key = [0x5au8; 32];
+        let payload = build_zfskey_handoff_payload("zroot/ROOT/default", &key).expect("payload");
+
+        assert_eq!(&payload[0..8], ZHAMEL_ZFSKEY_MAGIC);
+        assert_eq!(u32::from_le_bytes(payload[8..12].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(payload[12..16].try_into().unwrap()),
+            ZHAMEL_ZFSKEY_HEADER_LEN as u32
+        );
+        assert_eq!(u32::from_le_bytes(payload[16..20].try_into().unwrap()), 19);
+        assert_eq!(u32::from_le_bytes(payload[20..24].try_into().unwrap()), 32);
+        assert_eq!(u32::from_le_bytes(payload[24..28].try_into().unwrap()), 0);
+        assert_eq!(&payload[28..40], &[0u8; 12]);
+        assert_eq!(&payload[40..59], b"zroot/ROOT/default\0");
+        assert_eq!(&payload[59..91], &key);
+    }
+
+    #[test]
+    fn zfskey_payload_rejects_non_raw_key_length() {
+        assert!(build_zfskey_handoff_payload("zroot/ROOT/default", &[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn raw_keylocation_paths_try_boot_relative_first() {
+        assert_eq!(
+            paths_for_boot_dataset("/boot/keys/root.key"),
+            vec![
+                "/keys/root.key".to_string(),
+                "/boot/keys/root.key".to_string()
+            ]
+        );
+        assert_eq!(
+            paths_for_boot_dataset("/keys/root.key"),
+            vec!["/keys/root.key".to_string()]
+        );
     }
 }

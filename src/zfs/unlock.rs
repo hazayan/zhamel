@@ -9,11 +9,11 @@ use uefi::system;
 use crate::env::loader::LoaderEnv;
 use crate::error::{BootError, Result};
 use crate::tang;
-use crate::zfs::fs::{read_file_from_objset, DatasetProps};
+use crate::zfs::fs::{DatasetProps, read_file_from_objset};
 use crate::zfs::reader::objset::ObjsetPhys;
 
 #[derive(Debug)]
-enum KeyLocation {
+pub enum KeyLocation {
     Prompt,
     File(String),
     Unknown,
@@ -50,21 +50,19 @@ pub fn maybe_prompt_passphrase(
             env.set("kern.zfs.passphrase", &passphrase);
             Ok(())
         }
-        KeyLocation::File(path) => {
-            match read_keyfile(block, media_id, block_size, objset, &path) {
-                Ok(passphrase) => {
-                    log::info!("zfs: passphrase loaded from keylocation file");
-                    env.set("kern.zfs.passphrase", &passphrase);
-                    Ok(())
-                }
-                Err(err) => {
-                    log::warn!("zfs: keylocation file read failed: {:?}, prompting", err);
-                    let passphrase = prompt_passphrase("ZFS Passphrase: ")?;
-                    env.set("kern.zfs.passphrase", &passphrase);
-                    Ok(())
-                }
+        KeyLocation::File(path) => match read_keyfile(block, media_id, block_size, objset, &path) {
+            Ok(passphrase) => {
+                log::info!("zfs: passphrase loaded from keylocation file");
+                env.set("kern.zfs.passphrase", &passphrase);
+                Ok(())
             }
-        }
+            Err(err) => {
+                log::warn!("zfs: keylocation file read failed: {:?}, prompting", err);
+                let passphrase = prompt_passphrase("ZFS Passphrase: ")?;
+                env.set("kern.zfs.passphrase", &passphrase);
+                Ok(())
+            }
+        },
         KeyLocation::Unknown => Ok(()),
     }
 }
@@ -92,7 +90,7 @@ pub fn maybe_unlock_kunci(env: &mut LoaderEnv, props: &DatasetProps) -> Result<(
     Ok(())
 }
 
-fn parse_keylocation(input: &str) -> KeyLocation {
+pub fn parse_keylocation(input: &str) -> KeyLocation {
     let trimmed = input.trim();
     if trimmed.eq_ignore_ascii_case("prompt") {
         return KeyLocation::Prompt;
@@ -157,8 +155,8 @@ fn read_keyfile(
     if data.len() > 4096 {
         return Err(BootError::InvalidData("zfs keyfile too large"));
     }
-    let text = core::str::from_utf8(&data)
-        .map_err(|_| BootError::InvalidData("zfs keyfile utf8"))?;
+    let text =
+        core::str::from_utf8(&data).map_err(|_| BootError::InvalidData("zfs keyfile utf8"))?;
     Ok(text.trim().to_string())
 }
 
@@ -208,7 +206,7 @@ fn read_line(out: &mut String) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_keylocation, KeyLocation};
+    use super::{KeyLocation, parse_keylocation};
 
     #[test]
     fn parse_keylocation_prompt() {

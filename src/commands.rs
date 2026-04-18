@@ -2,13 +2,13 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use uefi::boot::{self, MemoryType, SearchType};
-use uefi::mem::memory_map::MemoryMap;
-use uefi::runtime::{self, ResetType};
-use uefi::proto::loaded_image::LoadedImage;
-use uefi::proto::rng::{Rng, RngAlgorithmType};
 use uefi::Identify;
 use uefi::Status;
+use uefi::boot::{self, MemoryType, SearchType};
+use uefi::mem::memory_map::MemoryMap;
+use uefi::proto::loaded_image::LoadedImage;
+use uefi::proto::rng::{Rng, RngAlgorithmType};
+use uefi::runtime::{self, ResetType};
 use uefi::system;
 
 use crate::env::loader::LoaderEnv;

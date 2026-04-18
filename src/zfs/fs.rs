@@ -1,30 +1,29 @@
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use uefi::boot;
 use uefi::proto::media::block::BlockIO;
 
 use crate::error::{BootError, Result};
-use crate::zfs::reader::dnode::{dnode_read, DnodePhys};
+use crate::uefi_helpers::block_io::open_block_io;
+use crate::zfs::ZfsPool;
+use crate::zfs::reader::dnode::{DnodePhys, dnode_read};
 use crate::zfs::reader::io::read_block;
 use crate::zfs::reader::mos;
-use crate::zfs::reader::objset::{objset_get_dnode, ObjsetPhys};
-use crate::zfs::reader::types::{BlkPtr, BLK_PTR_SIZE};
+use crate::zfs::reader::objset::{ObjsetPhys, objset_get_dnode};
+use crate::zfs::reader::types::{BLK_PTR_SIZE, BlkPtr};
 use crate::zfs::reader::zap::{
-    zap_list,
-    zap_list_entries,
-    zap_lookup_u64,
-    zap_lookup_u64_normalized,
+    zap_list, zap_list_entries, zap_lookup_u64, zap_lookup_u64_normalized,
 };
-use crate::zfs::ZfsPool;
 
 const DMU_POOL_DIRECTORY_OBJECT: u64 = 1;
 const DMU_POOL_ROOT_DATASET: &str = "root_dataset";
 const MASTER_NODE_OBJ: u64 = 1;
 const ZFS_ROOT_OBJ: &str = "ROOT";
 const ZFS_DIRENT_OBJ_MASK: u64 = (1u64 << 48) - 1;
+const DD_FIELD_CRYPTO_KEY_OBJ: &str = "com.datto:crypto_key_obj";
 const DSL_DIR_HEAD_DATASET_OFFSET: usize = 8;
 const DSL_DIR_CHILD_ZAP_OFFSET: usize = 32;
 const DSL_DIR_PROPS_ZAP_OFFSET: usize = 80;
@@ -39,11 +38,12 @@ pub struct DatasetProps {
     pub keyformat: Option<String>,
     pub keylocation: Option<String>,
     pub kunci_jwe: Option<String>,
+    pub pbkdf2_salt: Option<u64>,
+    pub pbkdf2_iters: Option<u64>,
 }
 
 pub fn read_file_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Result<Vec<u8>> {
-    let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
-        .map_err(|err| BootError::Uefi(err.status()))?;
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
     let uber = pool
         .uber
         .ok_or(BootError::InvalidData("uberblock missing"))?;
@@ -53,8 +53,7 @@ pub fn read_file_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Resu
 
 #[allow(dead_code)]
 pub fn list_dir_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Result<Vec<String>> {
-    let block = boot::open_protocol_exclusive::<BlockIO>(pool.handle)
-        .map_err(|err| BootError::Uefi(err.status()))?;
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
     let uber = pool
         .uber
         .ok_or(BootError::InvalidData("uberblock missing"))?;
@@ -85,31 +84,23 @@ pub fn bootenv_dataset_props(
     let mos = ObjsetPhys::from_bytes(&mos_bytes)?;
     let dir_obj = lookup_dataset_dir_obj(block, media_id, block_size, &mos, bootenv)?;
     let dir_dnode = objset_get_dnode(block, media_id, block_size, &mos, dir_obj)?;
+    dataset_props_from_dir(block, media_id, block_size, &mos, dir_obj, &dir_dnode)
+}
+
+fn dataset_props_from_dir(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    mos: &ObjsetPhys,
+    dir_obj: u64,
+    dir_dnode: &DnodePhys,
+) -> Result<DatasetProps> {
+    let mut props = DatasetProps::default();
     let props_zap = parse_dsl_dir_props_zap(&dir_dnode)?;
     if props_zap != 0 {
         match objset_get_dnode(block, media_id, block_size, &mos, props_zap) {
             Ok(props_dnode) => {
-                let keyformat = zap_lookup_string_opt(
-                    block,
-                    media_id,
-                    block_size,
-                    &props_dnode,
-                    "keyformat",
-                )?;
-                let keylocation = zap_lookup_string_opt(
-                    block,
-                    media_id,
-                    block_size,
-                    &props_dnode,
-                    "keylocation",
-                )?;
-                let kunci_jwe =
-                    zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "kunci:jwe")?;
-                return Ok(DatasetProps {
-                    keyformat,
-                    keylocation,
-                    kunci_jwe,
-                });
+                merge_props_from_zap(block, media_id, block_size, &props_dnode, &mut props)?;
             }
             Err(err) => {
                 log::warn!(
@@ -120,7 +111,49 @@ pub fn bootenv_dataset_props(
         }
     }
     let dataset_obj = parse_dsl_dir_head_dataset(&dir_dnode)?;
-    dataset_props_from_objid(block, media_id, block_size, &mos, dataset_obj)
+    let dataset_props = dataset_props_from_objid(block, media_id, block_size, mos, dataset_obj)?;
+    merge_missing_props(&mut props, dataset_props);
+    merge_crypto_props(
+        block, media_id, block_size, mos, dir_obj, dir_dnode, &mut props,
+    )?;
+    Ok(props)
+}
+
+pub fn datasets_for_mountpoint(pool: &ZfsPool, mountpoint: &str) -> Result<Vec<String>> {
+    let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
+    let uber = pool
+        .uber
+        .ok_or(BootError::InvalidData("uberblock missing"))?;
+    let mos_bytes = read_block(&block, pool.media_id, pool.block_size, &uber.rootbp)?;
+    let mos = ObjsetPhys::from_bytes(&mos_bytes)?;
+    let dir_dnode = objset_get_dnode(
+        &block,
+        pool.media_id,
+        pool.block_size,
+        &mos,
+        DMU_POOL_DIRECTORY_OBJECT,
+    )?;
+    let root_dir = zap_lookup_u64_normalized(
+        &block,
+        pool.media_id,
+        pool.block_size,
+        &dir_dnode,
+        DMU_POOL_ROOT_DATASET,
+    )? & ZFS_DIRENT_OBJ_MASK;
+    let target = normalize_mountpoint(mountpoint);
+    let mut out = Vec::new();
+    collect_datasets_by_mountpoint(
+        &block,
+        pool.media_id,
+        pool.block_size,
+        &mos,
+        root_dir,
+        String::new(),
+        &target,
+        0,
+        &mut out,
+    )?;
+    Ok(out)
 }
 
 fn mount_dataset(
@@ -174,16 +207,205 @@ fn dataset_props_from_objid(
         return Ok(DatasetProps::default());
     }
     let props_dnode = objset_get_dnode(block, media_id, block_size, mos, props_obj)?;
-    let keyformat = zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "keyformat")?;
-    let keylocation =
-        zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "keylocation")?;
-    let kunci_jwe =
-        zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "kunci:jwe")?;
-    Ok(DatasetProps {
-        keyformat,
-        keylocation,
-        kunci_jwe,
-    })
+    let mut props = DatasetProps::default();
+    merge_props_from_zap(block, media_id, block_size, &props_dnode, &mut props)?;
+    Ok(props)
+}
+
+fn merge_props_from_zap(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    props_dnode: &DnodePhys,
+    props: &mut DatasetProps,
+) -> Result<()> {
+    if props.keyformat.is_none() {
+        props.keyformat =
+            zap_lookup_string_opt(block, media_id, block_size, props_dnode, "keyformat")?;
+    }
+    if props.keylocation.is_none() {
+        props.keylocation =
+            zap_lookup_string_opt(block, media_id, block_size, props_dnode, "keylocation")?;
+    }
+    if props.kunci_jwe.is_none() {
+        props.kunci_jwe =
+            zap_lookup_string_opt(block, media_id, block_size, props_dnode, "kunci:jwe")?;
+    }
+    Ok(())
+}
+
+fn merge_crypto_props(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    mos: &ObjsetPhys,
+    dir_obj: u64,
+    dir_dnode: &DnodePhys,
+    props: &mut DatasetProps,
+) -> Result<()> {
+    let Some(crypto_obj) = zap_lookup_u64_normalized_opt(
+        block,
+        media_id,
+        block_size,
+        dir_dnode,
+        DD_FIELD_CRYPTO_KEY_OBJ,
+    )?
+    else {
+        return Ok(());
+    };
+    log::info!("zfs: dataset crypto key obj {} -> {}", dir_obj, crypto_obj);
+    let crypto_dnode = objset_get_dnode(block, media_id, block_size, mos, crypto_obj)?;
+    if props.keyformat.is_none() {
+        if let Some(raw) =
+            zap_lookup_u64_normalized_opt(block, media_id, block_size, &crypto_dnode, "keyformat")?
+        {
+            props.keyformat = Some(keyformat_name(raw));
+        }
+    }
+    if props.pbkdf2_salt.is_none() {
+        props.pbkdf2_salt = zap_lookup_u64_normalized_opt(
+            block,
+            media_id,
+            block_size,
+            &crypto_dnode,
+            "pbkdf2salt",
+        )?;
+    }
+    if props.pbkdf2_iters.is_none() {
+        props.pbkdf2_iters = zap_lookup_u64_normalized_opt(
+            block,
+            media_id,
+            block_size,
+            &crypto_dnode,
+            "pbkdf2iters",
+        )?;
+    }
+    Ok(())
+}
+
+fn merge_missing_props(dst: &mut DatasetProps, src: DatasetProps) {
+    if dst.keyformat.is_none() {
+        dst.keyformat = src.keyformat;
+    }
+    if dst.keylocation.is_none() {
+        dst.keylocation = src.keylocation;
+    }
+    if dst.kunci_jwe.is_none() {
+        dst.kunci_jwe = src.kunci_jwe;
+    }
+    if dst.pbkdf2_salt.is_none() {
+        dst.pbkdf2_salt = src.pbkdf2_salt;
+    }
+    if dst.pbkdf2_iters.is_none() {
+        dst.pbkdf2_iters = src.pbkdf2_iters;
+    }
+}
+
+fn keyformat_name(value: u64) -> String {
+    match value {
+        0 => "none".to_string(),
+        1 => "raw".to_string(),
+        2 => "hex".to_string(),
+        3 => "passphrase".to_string(),
+        _ => format!("unknown({})", value),
+    }
+}
+
+fn collect_datasets_by_mountpoint(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    mos: &ObjsetPhys,
+    dir_obj: u64,
+    path: String,
+    target: &str,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    if depth > 64 {
+        return Ok(());
+    }
+    let dir = objset_get_dnode(block, media_id, block_size, mos, dir_obj)?;
+    if let Some(mountpoint) = dataset_mountpoint_from_dir(block, media_id, block_size, mos, &dir)? {
+        if normalize_mountpoint(&mountpoint) == target && !path.is_empty() {
+            log::info!("zfs: mountpoint {} -> dataset {}", target, path);
+            out.push(path.clone());
+        }
+    }
+
+    let child_zap_obj = parse_dsl_dir_child_zap(&dir)?;
+    if child_zap_obj == 0 {
+        return Ok(());
+    }
+    let child_zap = objset_get_dnode(block, media_id, block_size, mos, child_zap_obj)?;
+    let children = zap_list_entries(block, media_id, block_size, &child_zap)?;
+    for (name, raw_obj) in children {
+        let child_obj = normalize_objid(raw_obj) & ZFS_DIRENT_OBJ_MASK;
+        if child_obj == 0 {
+            continue;
+        }
+        let child_path = if path.is_empty() {
+            name
+        } else {
+            format!("{}/{}", path, name)
+        };
+        if let Err(err) = collect_datasets_by_mountpoint(
+            block,
+            media_id,
+            block_size,
+            mos,
+            child_obj,
+            child_path,
+            target,
+            depth + 1,
+            out,
+        ) {
+            log::warn!("zfs: mountpoint scan child failed: {}", err);
+        }
+    }
+    Ok(())
+}
+
+fn dataset_mountpoint_from_dir(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    mos: &ObjsetPhys,
+    dir: &DnodePhys,
+) -> Result<Option<String>> {
+    let props_zap = parse_dsl_dir_props_zap(dir)?;
+    if props_zap != 0 {
+        if let Ok(props_dnode) = objset_get_dnode(block, media_id, block_size, mos, props_zap) {
+            if let Some(value) =
+                zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "mountpoint")?
+            {
+                return Ok(Some(value));
+            }
+        }
+    }
+
+    let dataset_obj = parse_dsl_dir_head_dataset(dir)?;
+    if dataset_obj == 0 {
+        return Ok(None);
+    }
+    let dataset_dnode = objset_get_dnode(block, media_id, block_size, mos, dataset_obj)?;
+    let props_obj = parse_dsl_dataset_props_obj(&dataset_dnode)?;
+    if props_obj == 0 {
+        return Ok(None);
+    }
+    let props_dnode = objset_get_dnode(block, media_id, block_size, mos, props_obj)?;
+    zap_lookup_string_opt(block, media_id, block_size, &props_dnode, "mountpoint")
+}
+
+fn normalize_mountpoint(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
 }
 
 fn zap_lookup_string_opt(
@@ -197,6 +419,24 @@ fn zap_lookup_string_opt(
         Ok(value) => Ok(Some(value)),
         Err(BootError::InvalidData(msg))
             if msg == "fzap entry not found" || msg == "mzap does not store strings" =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn zap_lookup_u64_normalized_opt(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    dnode: &DnodePhys,
+    name: &str,
+) -> Result<Option<u64>> {
+    match zap_lookup_u64_normalized(block, media_id, block_size, dnode, name) {
+        Ok(value) => Ok(Some(value)),
+        Err(BootError::InvalidData(msg))
+            if msg == "fzap entry not found" || msg == "zap type invalid" =>
         {
             Ok(None)
         }
@@ -294,7 +534,9 @@ fn parse_dsl_dataset_bp(dnode: &DnodePhys) -> Result<BlkPtr> {
 fn parse_dsl_dataset_props_obj(dnode: &DnodePhys) -> Result<u64> {
     let bonus = dnode.bonus.as_slice();
     if bonus.len() < DSL_DATASET_PROPS_OFFSET + 8 {
-        return Err(BootError::InvalidData("dsl dataset bonus too small for props"));
+        return Err(BootError::InvalidData(
+            "dsl dataset bonus too small for props",
+        ));
     }
     let raw = u64::from_le_bytes(
         bonus[DSL_DATASET_PROPS_OFFSET..DSL_DATASET_PROPS_OFFSET + 8]
@@ -310,11 +552,7 @@ fn normalize_objid(raw: u64) -> u64 {
     if value > (1u64 << 40) {
         value = value.swap_bytes();
     }
-    if value > (1u64 << 40) {
-        0
-    } else {
-        value
-    }
+    if value > (1u64 << 40) { 0 } else { value }
 }
 
 pub fn read_file_from_objset(
@@ -413,9 +651,7 @@ fn znode_size(dnode: &DnodePhys) -> Result<u64> {
             if bonus.len() < size_off + 8 {
                 return Err(BootError::InvalidData("sa size offset invalid"));
             }
-            let mut size = u64::from_le_bytes(
-                bonus[size_off..size_off + 8].try_into().unwrap(),
-            );
+            let mut size = u64::from_le_bytes(bonus[size_off..size_off + 8].try_into().unwrap());
             if size > (1u64 << 40) {
                 let swapped = size.swap_bytes();
                 if swapped < size {

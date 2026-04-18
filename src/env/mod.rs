@@ -1,3 +1,3 @@
-pub mod parser;
-pub mod loader;
 pub mod hooks;
+pub mod loader;
+pub mod parser;

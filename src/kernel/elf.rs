@@ -99,8 +99,8 @@ impl ElfLoader {
         let size = end
             .checked_sub(start)
             .ok_or(BootError::InvalidData("ELF load size overflow"))?;
-        let size = usize::try_from(size)
-            .map_err(|_| BootError::InvalidData("ELF load size too large"))?;
+        let size =
+            usize::try_from(size).map_err(|_| BootError::InvalidData("ELF load size too large"))?;
         let mut buf = alloc::vec![0u8; size];
 
         for phdr in &info.program_headers {
@@ -110,7 +110,11 @@ impl ElfLoader {
             if phdr.filesz > phdr.memsz {
                 return Err(BootError::InvalidData("ELF filesz exceeds memsz"));
             }
-            let base = if phdr.paddr != 0 { phdr.paddr } else { phdr.vaddr };
+            let base = if phdr.paddr != 0 {
+                phdr.paddr
+            } else {
+                phdr.vaddr
+            };
             if base < start {
                 return Err(BootError::InvalidData("ELF load address underflow"));
             }
@@ -161,7 +165,11 @@ impl Elf64Info {
             if addr < vbase || addr >= vend {
                 continue;
             }
-            let pbase = if phdr.paddr != 0 { phdr.paddr } else { phdr.vaddr };
+            let pbase = if phdr.paddr != 0 {
+                phdr.paddr
+            } else {
+                phdr.vaddr
+            };
             let phys = pbase.saturating_add(addr.saturating_sub(vbase));
             if phys < base || phys >= end {
                 continue;
@@ -179,7 +187,11 @@ impl Elf64Info {
             if phdr.p_type != PT_LOAD {
                 continue;
             }
-            let base = if phdr.paddr != 0 { phdr.paddr } else { phdr.vaddr };
+            let base = if phdr.paddr != 0 {
+                phdr.paddr
+            } else {
+                phdr.vaddr
+            };
             let end = base.saturating_add(phdr.memsz);
             if !found {
                 min = base;
@@ -190,11 +202,7 @@ impl Elf64Info {
                 max = core::cmp::max(max, end);
             }
         }
-        if found {
-            Some((min, max))
-        } else {
-            None
-        }
+        if found { Some((min, max)) } else { None }
     }
 
     pub fn section_addr(&self, name: &str) -> Option<u64> {
@@ -347,7 +355,10 @@ fn parse_section_headers(image: &[u8], header: &Elf64Header) -> Result<Vec<Secti
         let start = usize::try_from(sh.offset)
             .map_err(|_| BootError::InvalidData("ELF shstrtab offset overflow"))?;
         let end = start
-            .checked_add(usize::try_from(sh.size).map_err(|_| BootError::InvalidData("ELF shstrtab size overflow"))?)
+            .checked_add(
+                usize::try_from(sh.size)
+                    .map_err(|_| BootError::InvalidData("ELF shstrtab size overflow"))?,
+            )
             .ok_or(BootError::InvalidData("ELF shstrtab end overflow"))?;
         if end <= image.len() {
             &image[start..end]
@@ -514,8 +525,8 @@ mod tests {
     extern crate alloc;
     extern crate std;
 
+    use super::{ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ElfLoader};
     use alloc::vec::Vec;
-    use super::{ElfLoader, ELFCLASS64, ELFDATA2LSB, ELF_MAGIC, EV_CURRENT};
 
     fn decode_hex(text: &str) -> Vec<u8> {
         let mut out = Vec::new();

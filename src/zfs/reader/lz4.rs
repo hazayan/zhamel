@@ -28,7 +28,9 @@ pub fn decompress(src: &[u8], expected_size: usize) -> Result<Vec<u8>> {
                 }
                 let val = src[cursor] as usize;
                 cursor += 1;
-                lit_len = lit_len.checked_add(val).ok_or(BootError::InvalidData("lz4 length overflow"))?;
+                lit_len = lit_len
+                    .checked_add(val)
+                    .ok_or(BootError::InvalidData("lz4 length overflow"))?;
                 if val != 255 {
                     break;
                 }
@@ -69,7 +71,9 @@ pub fn decompress(src: &[u8], expected_size: usize) -> Result<Vec<u8>> {
                 }
             }
         }
-        match_len = match_len.checked_add(4).ok_or(BootError::InvalidData("lz4 match length overflow"))?;
+        match_len = match_len
+            .checked_add(4)
+            .ok_or(BootError::InvalidData("lz4 match length overflow"))?;
 
         let start = dst
             .len()

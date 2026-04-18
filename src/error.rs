@@ -59,18 +59,51 @@ pub type Result<T> = core::result::Result<T, BootError>;
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     extern crate std;
 
+    use alloc::format;
+
     use super::{BootError, Status};
+
+    #[cfg(target_os = "uefi")]
+    fn unsupported_status() -> Status {
+        Status::UNSUPPORTED
+    }
+
+    #[cfg(not(target_os = "uefi"))]
+    fn unsupported_status() -> Status {
+        Status::Unsupported
+    }
+
+    #[cfg(target_os = "uefi")]
+    fn invalid_parameter_status() -> Status {
+        Status::INVALID_PARAMETER
+    }
+
+    #[cfg(not(target_os = "uefi"))]
+    fn invalid_parameter_status() -> Status {
+        Status::InvalidParameter
+    }
+
+    #[cfg(target_os = "uefi")]
+    fn passthrough_status() -> Status {
+        Status::ABORTED
+    }
+
+    #[cfg(not(target_os = "uefi"))]
+    fn passthrough_status() -> Status {
+        Status::Other
+    }
 
     #[test]
     fn test_status_mapping() {
         let err = BootError::Unsupported("nope");
-        assert_eq!(err.status(), Status::Unsupported);
+        assert_eq!(err.status(), unsupported_status());
         let err = BootError::InvalidData("bad");
-        assert_eq!(err.status(), Status::InvalidParameter);
-        let err = BootError::Uefi(Status::Other);
-        assert_eq!(err.status(), Status::Other);
+        assert_eq!(err.status(), invalid_parameter_status());
+        let err = BootError::Uefi(passthrough_status());
+        assert_eq!(err.status(), passthrough_status());
     }
 
     #[test]
@@ -79,7 +112,7 @@ mod tests {
         assert_eq!(format!("{err}"), "unsupported: feature");
         let err = BootError::InvalidData("payload");
         assert_eq!(format!("{err}"), "invalid data: payload");
-        let err = BootError::Uefi(Status::Unsupported);
+        let err = BootError::Uefi(unsupported_status());
         assert_eq!(format!("{err}"), "uefi error: UNSUPPORTED");
     }
 }

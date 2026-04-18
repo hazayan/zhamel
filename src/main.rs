@@ -2,7 +2,6 @@
 #![cfg_attr(target_os = "uefi", no_std)]
 #![cfg_attr(all(target_os = "uefi", test), allow(dead_code, unused_imports))]
 
-
 #[cfg(target_os = "uefi")]
 extern crate alloc;
 
@@ -19,11 +18,11 @@ mod console;
 #[cfg(target_os = "uefi")]
 mod currdev;
 #[cfg(target_os = "uefi")]
-mod error;
-#[cfg(target_os = "uefi")]
 mod devsw;
 #[cfg(target_os = "uefi")]
 mod env;
+#[cfg(target_os = "uefi")]
+mod error;
 #[cfg(target_os = "uefi")]
 mod exit;
 #[cfg(target_os = "uefi")]
@@ -43,30 +42,32 @@ mod mbr;
 #[cfg(target_os = "uefi")]
 mod secureboot;
 #[cfg(target_os = "uefi")]
-mod tang;
-#[cfg(target_os = "uefi")]
-mod zfs;
-#[cfg(all(target_os = "uefi", test))]
-mod uefi_tests;
-#[cfg(target_os = "uefi")]
-mod uefi_helpers;
-#[cfg(target_os = "uefi")]
 mod startup;
+#[cfg(target_os = "uefi")]
+mod tang;
 #[cfg(target_os = "uefi")]
 mod time;
 #[cfg(target_os = "uefi")]
-mod version;
-
-#[cfg(all(target_os = "uefi", not(test)))]
-use uefi::boot;
+mod uefi_helpers;
+#[cfg(all(target_os = "uefi", test))]
+mod uefi_tests;
 #[cfg(target_os = "uefi")]
-use uefi::prelude::*;
+mod version;
+#[cfg(target_os = "uefi")]
+mod zfs;
+
+#[cfg(target_os = "uefi")]
+use crate::kernel::types::ModuleType;
 #[cfg(target_os = "uefi")]
 use alloc::collections::BTreeMap;
 #[cfg(target_os = "uefi")]
 use alloc::string::ToString;
 #[cfg(target_os = "uefi")]
-use crate::kernel::types::ModuleType;
+use kernel::module::Module;
+#[cfg(all(target_os = "uefi", not(test)))]
+use uefi::boot;
+#[cfg(target_os = "uefi")]
+use uefi::prelude::*;
 
 #[cfg(target_os = "uefi")]
 fn parse_u32(value: &str) -> Option<u32> {
@@ -79,11 +80,40 @@ fn parse_u32(value: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "uefi")]
+fn zfs_probe_devices_from_gpt(
+    block_devices: &[uefi_helpers::BlockDeviceInfo],
+    gpt_disks: &[gpt::GptDisk],
+) -> alloc::vec::Vec<uefi_helpers::BlockDeviceInfo> {
+    let mut zfs_guids = alloc::vec::Vec::new();
+    for disk in gpt_disks {
+        for partition in &disk.partitions {
+            if gpt::partition_kind(partition.type_guid) == gpt::GptPartitionKind::FreeBsdZfs {
+                zfs_guids.push(partition.unique_guid);
+            }
+        }
+    }
+    if zfs_guids.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+
+    let mut out = alloc::vec::Vec::new();
+    for device in block_devices {
+        if !device.logical_partition {
+            continue;
+        }
+        let Some(guid) = uefi_helpers::device_path::partition_guid_for_handle(device.handle) else {
+            continue;
+        };
+        if zfs_guids.iter().any(|candidate| *candidate == guid) {
+            out.push(device.clone());
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "uefi")]
 fn is_truthy(value: &str) -> bool {
-    matches!(
-        value,
-        "1" | "YES" | "yes" | "true" | "TRUE" | "on" | "ON"
-    )
+    matches!(value, "1" | "YES" | "yes" | "true" | "TRUE" | "on" | "ON")
 }
 
 #[cfg(target_os = "uefi")]
@@ -164,6 +194,35 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[cfg(target_os = "uefi")]
+fn zfs_module_preconditions_ok(modules: &[Module], zfskey_required: bool) -> bool {
+    let zfs_loaded = modules.iter().any(|module| module_matches(module, "zfs"));
+    if !zfs_loaded {
+        log::warn!("zfs: required zfs.ko module was not loaded; refusing ZFS root handoff");
+        return false;
+    }
+    if zfskey_required
+        && !modules
+            .iter()
+            .any(|module| module_matches(module, "zhamel_zfskey"))
+    {
+        log::warn!(
+            "zfs: native key handoff prepared but zhamel_zfskey.ko was not loaded; refusing ZFS root handoff"
+        );
+        return false;
+    }
+    true
+}
+
+#[cfg(target_os = "uefi")]
+fn module_matches(module: &Module, base: &str) -> bool {
+    let name = module.name.as_str();
+    name == base
+        || name == alloc::format!("{}.ko", base)
+        || name.ends_with(&alloc::format!("/{}", base))
+        || name.ends_with(&alloc::format!("/{}.ko", base))
+}
+
+#[cfg(target_os = "uefi")]
 const RB_ASKNAME: u32 = 0x001;
 #[cfg(target_os = "uefi")]
 const RB_SINGLE: u32 = 0x002;
@@ -200,9 +259,7 @@ fn handle_kernel_image(
     source_label: &str,
 ) -> Option<Status> {
     if let Err(err) = secureboot::verify_path(
-        loader_env
-            .get("kernel")
-            .unwrap_or("/boot/kernel/kernel"),
+        loader_env.get("kernel").unwrap_or("/boot/kernel/kernel"),
         &kernel,
     ) {
         log::warn!("secureboot kernel verify failed: {}", err);
@@ -245,9 +302,9 @@ fn handle_kernel_image(
             let envp = kernel::build_envp(loader_env);
             let howto = boot_howto_from_env(loader_env);
             log::info!("boot_howto: 0x{:x}", howto);
-            let stage_copy = matches!(
+            let stage_copy = !matches!(
                 loader_env.get("zhamel_stage_copy"),
-                Some("1") | Some("YES") | Some("yes") | Some("true")
+                Some("0") | Some("NO") | Some("no") | Some("false")
             );
             let efi_map = match kernel::collect_efi_map_metadata() {
                 Ok(map) => Some(map),
@@ -275,10 +332,14 @@ fn handle_kernel_image(
                             phys.base,
                             phys.size
                         );
-                        if let Err(err) = kernel::load_modules_to_memory(&mut modules) {
+                        let module_base = phys.base.saturating_add(phys.size as u64);
+                        if let Err(err) =
+                            kernel::load_modules_to_memory_at(&mut modules, module_base)
+                        {
                             log::warn!("module memory allocation failed: {}", err);
                         } else {
-                            let allocated = modules.iter().filter(|m| m.phys_addr.is_some()).count();
+                            let allocated =
+                                modules.iter().filter(|m| m.phys_addr.is_some()).count();
                             log::info!("kernel modules allocated: {}", allocated);
                         }
                         log::warn!("handoff requested; exiting boot services");
@@ -432,7 +493,12 @@ fn main() -> Status {
             }
         }
     }
-    log::info!("gpt partitions: esp={} ufs={} zfs={}", gpt_esp, gpt_ufs, gpt_zfs);
+    log::info!(
+        "gpt partitions: esp={} ufs={} zfs={}",
+        gpt_esp,
+        gpt_ufs,
+        gpt_zfs
+    );
 
     let ufs_volumes = fs::ufs::probe_from_gpt(&gpt_disks);
     let ufs_mbr = fs::ufs::probe_from_mbr(&block_devices);
@@ -444,7 +510,23 @@ fn main() -> Status {
         ufs_raw.len()
     );
 
-    let zfs_pools = zfs::probe_pools(&block_devices);
+    let zfs_probe_devices = zfs_probe_devices_from_gpt(&block_devices, &gpt_disks);
+    let zfs_pools = if zfs_probe_devices.is_empty() {
+        log::warn!("zfs: no GPT FreeBSD ZFS BlockIO handles matched; probing all block devices");
+        zfs::probe_pools(&block_devices)
+    } else {
+        log::info!(
+            "zfs: probing {} GPT FreeBSD ZFS BlockIO handle(s)",
+            zfs_probe_devices.len()
+        );
+        let pools = zfs::probe_pools(&zfs_probe_devices);
+        if pools.is_empty() {
+            log::warn!("zfs: GPT ZFS candidates yielded no pools; probing all block devices");
+            zfs::probe_pools(&block_devices)
+        } else {
+            pools
+        }
+    };
     log::info!("zfs pools: {}", zfs_pools.len());
     if let Err(err) = zfs::validate_bootenv(&zfs_pools) {
         log::warn!("zfs bootenv validation failed: {}", err);
@@ -458,15 +540,70 @@ fn main() -> Status {
         log::warn!("zfs passphrase prompt failed: {}", err);
     }
 
-    if let Some((pool_index, kernel)) = kernel::read_kernel_from_zfs_bootfs(&zfs_pools, &loader_env)
+    if let Some((pool_index, zfs_source, kernel)) =
+        kernel::read_kernel_from_zfs_bootfs(&zfs_pools, &loader_env)
     {
-        let modules = kernel::discover_modules_from_zfs_bootfs(&zfs_pools, pool_index, &mut loader_env);
+        kernel::reload_loader_conf_from_zfs_bootfs(
+            &zfs_pools,
+            pool_index,
+            &zfs_source,
+            &mut loader_env,
+        );
+        if let Err(err) = zfs::maybe_unlock_kunci(&zfs_pools, &mut loader_env) {
+            log::warn!("zfs kunci unlock failed after loader.conf reload: {}", err);
+        }
+        if let Err(err) = zfs::maybe_prompt_passphrase(&zfs_pools, &mut loader_env) {
+            log::warn!(
+                "zfs passphrase prompt failed after loader.conf reload: {}",
+                err
+            );
+        }
+        let zfskey_module = match zfs::maybe_prepare_zfskey_handoff(&zfs_pools, &mut loader_env) {
+            Ok(module) => module,
+            Err(err) => {
+                log::warn!("zfs native key handoff preparation failed: {}", err);
+                None
+            }
+        };
+        log::info!("zfs: starting module discovery from boot dataset");
+        let mut modules = kernel::discover_modules_from_zfs_bootfs(
+            &zfs_pools,
+            pool_index,
+            &zfs_source,
+            &mut loader_env,
+        );
+        log::info!("zfs: module discovery complete count={}", modules.len());
+        let zfskey_required = zfskey_module.is_some();
+        if !zfs_module_preconditions_ok(&modules, zfskey_required) {
+            return Status::LOAD_ERROR;
+        }
+        if let Some(module) = zfskey_module {
+            modules.push(module);
+        }
         if let Some(status) = handle_kernel_image(kernel, modules, &mut loader_env, "zfs") {
             return status;
         }
     } else if let Some(bootonce) = zfs::bootonce_for_pools(&zfs_pools) {
         if let Some(kernel) = kernel::read_kernel_from_zfs(&zfs_pools, bootonce, &loader_env) {
-            let modules = kernel::discover_modules_from_zfs(&zfs_pools, bootonce, &mut loader_env);
+            let zfskey_module = match zfs::maybe_prepare_zfskey_handoff(&zfs_pools, &mut loader_env)
+            {
+                Ok(module) => module,
+                Err(err) => {
+                    log::warn!("zfs native key handoff preparation failed: {}", err);
+                    None
+                }
+            };
+            log::info!("zfs: starting module discovery from bootenv {}", bootonce);
+            let mut modules =
+                kernel::discover_modules_from_zfs(&zfs_pools, bootonce, &mut loader_env);
+            log::info!("zfs: module discovery complete count={}", modules.len());
+            let zfskey_required = zfskey_module.is_some();
+            if !zfs_module_preconditions_ok(&modules, zfskey_required) {
+                return Status::LOAD_ERROR;
+            }
+            if let Some(module) = zfskey_module {
+                modules.push(module);
+            }
             if let Some(status) = handle_kernel_image(kernel, modules, &mut loader_env, "zfs") {
                 return status;
             }
@@ -482,7 +619,9 @@ fn main() -> Status {
         if curr.prefer_iso {
             log::info!("currdev prefers iso9660");
             if let Some(handle) = curr.iso_handle {
-                if let Some(text) = crate::uefi_helpers::device_path::device_path_text_for_handle(handle) {
+                if let Some(text) =
+                    crate::uefi_helpers::device_path::device_path_text_for_handle(handle)
+                {
                     log::info!("iso9660 handle: {}", text);
                 } else {
                     log::info!("iso9660 handle resolved (no text)");
@@ -500,10 +639,14 @@ fn main() -> Status {
                 if gpt::partition_kind(match_info.partition.type_guid)
                     == gpt::GptPartitionKind::EfiSystem
                 {
-                    if let Some(ufs_part) = gpt_disks[match_info.disk_index]
-                        .partitions
-                        .iter()
-                        .find(|p| gpt::partition_kind(p.type_guid) == gpt::GptPartitionKind::FreeBsdUfs)
+                    if let Some(ufs_part) =
+                        gpt_disks[match_info.disk_index]
+                            .partitions
+                            .iter()
+                            .find(|p| {
+                                gpt::partition_kind(p.type_guid)
+                                    == gpt::GptPartitionKind::FreeBsdUfs
+                            })
                     {
                         log::info!(
                             "currdev ESP; switching to UFS partition {} on disk {}",
@@ -628,7 +771,10 @@ mod host_tests {
 
     #[test]
     fn test_host_main_message() {
-        assert_eq!(super::host_main_message(), "zhamel builds for UEFI targets only");
+        assert_eq!(
+            super::host_main_message(),
+            "zhamel builds for UEFI targets only"
+        );
     }
 }
 

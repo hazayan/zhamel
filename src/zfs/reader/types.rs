@@ -182,7 +182,9 @@ pub fn dva_get_offset(dva: &Dva) -> u64 {
 }
 
 pub fn bp_is_hole(bp: &BlkPtr) -> bool {
-    bp.dvas.iter().all(|dva| dva.word[0] == 0 && dva.word[1] == 0)
+    bp.dvas
+        .iter()
+        .all(|dva| dva.word[0] == 0 && dva.word[1] == 0)
 }
 
 pub fn bp_should_byteswap(bp: &BlkPtr) -> bool {
@@ -190,11 +192,7 @@ pub fn bp_should_byteswap(bp: &BlkPtr) -> bool {
 }
 
 fn host_byteorder() -> u64 {
-    if cfg!(target_endian = "little") {
-        1
-    } else {
-        0
-    }
+    if cfg!(target_endian = "little") { 1 } else { 0 }
 }
 
 impl Uberblock {
@@ -290,7 +288,7 @@ fn bp_get_psize(bp: &BlkPtr) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{bf64_get, bp_get_lsize, bp_get_psize, BlkPtr, Dva, ZioCksum};
+    use super::{BlkPtr, Dva, ZioCksum, bf64_get, bp_get_lsize, bp_get_psize};
 
     #[test]
     fn bf64_get_basic() {

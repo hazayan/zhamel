@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use uefi::runtime::{self, VariableVendor};
 use uefi::{CStr16, Guid};
 
-use crate::env::parser::{parse_loader_conf_text, parse_loader_env_text, EnvVar};
+use crate::env::parser::{EnvVar, parse_loader_conf_text, parse_loader_env_text};
 use crate::fs::uefi::{
     read_dir_entries_from_boot_volume, read_dir_entries_from_partition_guid,
     read_file_from_boot_volume, read_file_from_partition_guid,
@@ -59,7 +59,9 @@ impl LoaderEnv {
 pub fn load_from_boot_volume() -> LoaderEnv {
     let mut env_vars = Vec::new();
 
-    if let Some(path) = read_freebsd_var("LoaderEnv").or_else(|| Some(String::from(LOADER_ENV_DEFAULT))) {
+    if let Some(path) =
+        read_freebsd_var("LoaderEnv").or_else(|| Some(String::from(LOADER_ENV_DEFAULT)))
+    {
         if let Some(bytes) = read_file(&path) {
             log::info!("loader env read {} bytes from {}", bytes.len(), path);
             if let Ok(text) = core::str::from_utf8(&bytes) {
@@ -89,7 +91,10 @@ pub fn load_from_boot_volume() -> LoaderEnv {
         log::info!("loader.conf vars loaded: {}", conf_vars.len());
     }
 
-    LoaderEnv { env_vars, conf_vars }
+    LoaderEnv {
+        env_vars,
+        conf_vars,
+    }
 }
 
 pub fn load_loader_conf_from_partition_guid(
@@ -120,7 +125,11 @@ fn load_loader_conf_from_boot_volume(env_vars: &[EnvVar]) -> Vec<EnvVar> {
     )
 }
 
-fn load_loader_conf_with<F, D>(env_vars: &[EnvVar], read_file: F, read_dir: D) -> Vec<EnvVar>
+pub(crate) fn load_loader_conf_with<F, D>(
+    env_vars: &[EnvVar],
+    read_file: F,
+    read_dir: D,
+) -> Vec<EnvVar>
 where
     F: Fn(&str) -> Option<Vec<u8>>,
     D: Fn(&str) -> Option<Vec<String>>,
@@ -198,8 +207,8 @@ where
 
     load_nextboot_conf(env_vars, &read_file, &mut conf_vars, &mut loaded_files);
 
-    let local_files =
-        get_env_value(env_vars, &conf_vars, "local_loader_conf_files").map(|value| value.to_string());
+    let local_files = get_env_value(env_vars, &conf_vars, "local_loader_conf_files")
+        .map(|value| value.to_string());
     if let Some(local_files) = local_files {
         for name in local_files.split_whitespace() {
             read_loader_conf_file(name, &read_file, &mut conf_vars, &mut loaded_files);
@@ -215,8 +224,7 @@ fn load_loader_conf_dir<F, D>(
     read_file: &F,
     conf_vars: &mut Vec<EnvVar>,
     loaded_files: &mut BTreeSet<String>,
-)
-where
+) where
     F: Fn(&str) -> Option<Vec<u8>>,
     D: Fn(&str) -> Option<Vec<String>>,
 {
@@ -241,8 +249,7 @@ fn read_loader_conf_file<F>(
     read_file: &F,
     conf_vars: &mut Vec<EnvVar>,
     loaded_files: &mut BTreeSet<String>,
-)
-where
+) where
     F: Fn(&str) -> Option<Vec<u8>>,
 {
     if loaded_files.contains(path) {
@@ -354,7 +361,11 @@ fn is_yes(value: &str) -> bool {
     matches!(value, "YES" | "yes" | "1" | "true" | "TRUE" | "on" | "ON")
 }
 
-fn get_env_value<'a>(env_vars: &'a [EnvVar], conf_vars: &'a [EnvVar], key: &str) -> Option<&'a str> {
+fn get_env_value<'a>(
+    env_vars: &'a [EnvVar],
+    conf_vars: &'a [EnvVar],
+    key: &str,
+) -> Option<&'a str> {
     env_vars
         .iter()
         .find(|var| var.key == key)
@@ -366,7 +377,6 @@ fn get_env_value<'a>(env_vars: &'a [EnvVar], conf_vars: &'a [EnvVar], key: &str)
                 .map(|var| var.value.as_str())
         })
 }
-
 
 fn read_freebsd_var(name: &str) -> Option<String> {
     let mut buf = [0u16; 64];
@@ -394,6 +404,5 @@ fn delete_freebsd_var(name: &str) {
 
 const LOADER_ENV_DEFAULT: &str = "/efi/freebsd/loader.env";
 const FREEBSD_BOOT_VAR_GUID: Guid = Guid::from_bytes([
-    0xCF, 0xEE, 0x69, 0xAD, 0xA0, 0xDE, 0x47, 0xA9, 0x93, 0xA8, 0xF6, 0x31, 0x06, 0xF8,
-    0xAE, 0x99,
+    0xCF, 0xEE, 0x69, 0xAD, 0xA0, 0xDE, 0x47, 0xA9, 0x93, 0xA8, 0xF6, 0x31, 0x06, 0xF8, 0xAE, 0x99,
 ]);

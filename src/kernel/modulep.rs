@@ -3,8 +3,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::kernel::types::{
-    ModInfoMd, MODINFO_ADDR, MODINFO_ARGS, MODINFO_END, MODINFO_METADATA, MODINFO_NAME,
-    MODINFO_SIZE, MODINFO_TYPE,
+    MODINFO_ADDR, MODINFO_ARGS, MODINFO_END, MODINFO_METADATA, MODINFO_NAME, MODINFO_SIZE,
+    MODINFO_TYPE, ModInfoMd,
 };
 use alloc::string::ToString;
 
@@ -102,6 +102,18 @@ impl ModulepBuilder {
         if let Some(addr) = module.phys_addr {
             self.add_addr(addr);
             self.add_size(module.data_len as u64);
+            if let Some(header) = module.elf_header.as_ref() {
+                self.add_metadata_bytes(ModInfoMd::Elfhdr, header);
+            }
+            if !module.section_headers.is_empty() {
+                if let Some(shdr) = relocated_section_headers(
+                    &module.section_headers,
+                    &module.section_addr_offsets,
+                    addr,
+                ) {
+                    self.add_metadata_bytes(ModInfoMd::Shdr, &shdr);
+                }
+            }
             true
         } else {
             false
@@ -119,17 +131,44 @@ impl ModulepBuilder {
     }
 }
 
+fn relocated_section_headers(
+    section_headers: &[u8],
+    section_addr_offsets: &[Option<u64>],
+    base: u64,
+) -> Option<Vec<u8>> {
+    let shentsize = 64usize;
+    if section_headers.len() % shentsize != 0
+        || section_addr_offsets.len() != section_headers.len() / shentsize
+    {
+        return None;
+    }
+    let mut out = section_headers.to_vec();
+    for (index, chunk) in out.chunks_mut(shentsize).enumerate() {
+        if let Some(rel_addr) = section_addr_offsets[index] {
+            let addr = base.checked_add(rel_addr)?;
+            chunk[16..24].copy_from_slice(&addr.to_le_bytes());
+        } else {
+            chunk[16..24].copy_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     extern crate std;
 
     use alloc::string::String;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     use super::ModulepBuilder;
     use crate::kernel::module::Module;
-    use crate::kernel::types::{ModuleType, MODINFO_ADDR, MODINFO_END, MODINFO_NAME, MODINFO_SIZE, MODINFO_TYPE};
+    use crate::kernel::types::{
+        MODINFO_ADDR, MODINFO_END, MODINFO_METADATA, MODINFO_NAME, MODINFO_SIZE, MODINFO_TYPE,
+        ModInfoMd, ModuleType,
+    };
 
     #[test]
     fn test_modulep_builder_adds_end() {
@@ -137,7 +176,12 @@ mod tests {
         builder.add_name("kernel");
         let buf = builder.finish();
 
-        let end_tag = u32::from_le_bytes([buf[buf.len() - 8], buf[buf.len() - 7], buf[buf.len() - 6], buf[buf.len() - 5]]);
+        let end_tag = u32::from_le_bytes([
+            buf[buf.len() - 8],
+            buf[buf.len() - 7],
+            buf[buf.len() - 6],
+            buf[buf.len() - 5],
+        ]);
         assert_eq!(end_tag, MODINFO_END);
     }
 
@@ -166,15 +210,58 @@ mod tests {
         let buf = builder.finish();
         let tags = decode_tags(&buf);
 
-        let first = find_tag_sequence(&tags, &[MODINFO_NAME, MODINFO_TYPE, MODINFO_ADDR, MODINFO_SIZE])
-            .expect("first module sequence");
-        let second =
-            find_tag_sequence(&tags[first + 1..], &[MODINFO_NAME, MODINFO_TYPE, MODINFO_ADDR, MODINFO_SIZE])
-                .expect("second module sequence");
+        let first = find_tag_sequence(
+            &tags,
+            &[MODINFO_NAME, MODINFO_TYPE, MODINFO_ADDR, MODINFO_SIZE],
+        )
+        .expect("first module sequence");
+        let second = find_tag_sequence(
+            &tags[first + 1..],
+            &[MODINFO_NAME, MODINFO_TYPE, MODINFO_ADDR, MODINFO_SIZE],
+        )
+        .expect("second module sequence");
         assert!(first + 1 + second > first);
     }
 
+    #[test]
+    fn test_modulep_builder_adds_elf_obj_metadata() {
+        let mut module = Module::new(String::from("zfs.ko"), ModuleType::ElfObj, Vec::new());
+        module.set_physical_address(0x1000);
+        module.set_data_len(0x4000);
+        let header = [0x7fu8; 64];
+        let shdr = vec![0u8; 64];
+        module.set_elf_metadata(header, shdr, vec![Some(0x200)]);
+
+        let mut builder = ModulepBuilder::new();
+        assert!(builder.add_module(&module));
+        let buf = builder.finish();
+        let records = decode_records(&buf);
+
+        assert!(records.iter().any(|(tag, size, _)| *tag
+            == (MODINFO_METADATA | ModInfoMd::Elfhdr as u32)
+            && *size == 64));
+        let (_, _, shdr_offset) = records
+            .iter()
+            .find(|(tag, size, _)| {
+                *tag == (MODINFO_METADATA | ModInfoMd::Shdr as u32) && *size == 64
+            })
+            .expect("section header metadata");
+        let relocated = u64::from_le_bytes(
+            buf[*shdr_offset + 16..*shdr_offset + 24]
+                .try_into()
+                .expect("u64 section address"),
+        );
+        assert_eq!(relocated, 0x1200);
+    }
+
     fn decode_tags(buf: &[u8]) -> Vec<u32> {
+        decode_records(buf)
+            .into_iter()
+            .map(|(tag, _, _)| tag)
+            .collect()
+    }
+
+    fn decode_records(buf: &[u8]) -> Vec<(u32, usize, usize)> {
         let mut tags = Vec::new();
         let mut offset = 0usize;
         while offset + 8 <= buf.len() {
@@ -190,7 +277,7 @@ mod tests {
                 buf[offset + 6],
                 buf[offset + 7],
             ]) as usize;
-            tags.push(tag);
+            tags.push((tag, size, offset + 8));
             let mut next = offset + 8 + size;
             let rem = next % 8;
             if rem != 0 {

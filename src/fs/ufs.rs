@@ -5,13 +5,13 @@ use alloc::vec::Vec;
 
 use crate::gpt::GptDisk;
 use crate::mbr::parse_mbr;
-use crate::uefi_helpers::{find_partition_handle_by_guid, BlockDeviceInfo};
 use crate::uefi_helpers::block_io::{
     find_block_handle_by_device_path_exact, find_block_handle_by_device_path_prefix, open_block_io,
 };
 use crate::uefi_helpers::device_path::device_path_bytes_for_handle;
-use uefi::boot::{self, ScopedProtocol};
+use crate::uefi_helpers::{BlockDeviceInfo, find_partition_handle_by_guid};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use uefi::boot::{self, ScopedProtocol};
 use uefi::proto::media::block::BlockIO;
 use uefi::{Handle, Status};
 
@@ -98,12 +98,8 @@ pub fn probe_from_mbr(devices: &[BlockDeviceInfo]) -> Vec<UfsVolume> {
             continue;
         };
         for part in parts {
-            let kind = probe_partition_at_lba(
-                &block,
-                media.media_id(),
-                block_size,
-                part.first_lba as u64,
-            );
+            let kind =
+                probe_partition_at_lba(&block, media.media_id(), block_size, part.first_lba as u64);
             if let Some(kind) = kind {
                 volumes.push(UfsVolume {
                     disk_index,
@@ -154,7 +150,12 @@ pub fn probe_by_partition_guid(disks: &[GptDisk], guid: [u8; 16]) -> Option<UfsV
     if block_size == 0 {
         return None;
     }
-    let kind = probe_partition_at_lba(&block, media.media_id(), block_size, match_info.partition.first_lba)?;
+    let kind = probe_partition_at_lba(
+        &block,
+        media.media_id(),
+        block_size,
+        match_info.partition.first_lba,
+    )?;
     Some(UfsVolume {
         disk_index: match_info.disk_index,
         partition_index: match_info.partition.index,
@@ -262,13 +263,18 @@ impl UfsDevice {
                                 }
                                 Err(err) => {
                                     if err.status() == Status::INVALID_PARAMETER {
-                                        if let Ok(block) = boot::open_protocol_exclusive::<BlockIO>(alt) {
+                                        if let Ok(block) =
+                                            boot::open_protocol_exclusive::<BlockIO>(alt)
+                                        {
                                             log::warn!(
                                                 "ufs: BlockIO opened exclusive via device path match"
                                             );
                                             block
                                         } else {
-                                            log::warn!("ufs: BlockIO retry failed: {:?}", err.status());
+                                            log::warn!(
+                                                "ufs: BlockIO retry failed: {:?}",
+                                                err.status()
+                                            );
                                             return None;
                                         }
                                     } else {
@@ -686,8 +692,7 @@ impl UfsReader {
                 let run_limit = core::cmp::min(max_blocks, max_blocks_by_size);
                 while run_blocks < run_limit {
                     let next_file_block = file_block + run_blocks as u64;
-                    let next_block_size =
-                        self.fs.sblksize(file.size(), next_file_block)? as usize;
+                    let next_block_size = self.fs.sblksize(file.size(), next_file_block)? as usize;
                     if next_block_size != full_block {
                         break;
                     }
@@ -744,8 +749,7 @@ impl UfsReader {
                     );
                 }
                 let buf = self.read_fs_block(disk_block, block_size)?;
-                out[out_pos..out_pos + size_to_copy]
-                    .copy_from_slice(&buf[off..off + size_to_copy]);
+                out[out_pos..out_pos + size_to_copy].copy_from_slice(&buf[off..off + size_to_copy]);
                 file.seekp = file.seekp.saturating_add(size_to_copy as u64);
                 out_pos += size_to_copy;
                 if file.debug_steps_left > 0 {
@@ -851,8 +855,7 @@ impl UfsReader {
                 let run_limit = core::cmp::min(max_blocks, max_blocks_by_size);
                 while run_blocks < run_limit {
                     let next_file_block = file_block + run_blocks as u64;
-                    let next_block_size =
-                        self.fs.sblksize(file.size(), next_file_block)? as usize;
+                    let next_block_size = self.fs.sblksize(file.size(), next_file_block)? as usize;
                     if next_block_size != full_block {
                         break;
                     }
@@ -909,8 +912,7 @@ impl UfsReader {
                     );
                 }
                 let buf = self.read_fs_block(disk_block, block_size)?;
-                out[out_pos..out_pos + size_to_copy]
-                    .copy_from_slice(&buf[off..off + size_to_copy]);
+                out[out_pos..out_pos + size_to_copy].copy_from_slice(&buf[off..off + size_to_copy]);
                 file.seekp = file.seekp.saturating_add(size_to_copy as u64);
                 out_pos += size_to_copy;
                 if file.debug_steps_left > 0 {
@@ -1386,14 +1388,12 @@ fn parse_ufs1_inode(buf: &[u8]) -> Option<UfsInode> {
     let db_start = 40;
     for idx in 0..UFS_NDADDR {
         let off = db_start + idx * 4;
-        db[idx] = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-            as i64;
+        db[idx] = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as i64;
     }
     let ib_start = db_start + UFS_NDADDR * 4;
     for idx in 0..UFS_NIADDR {
         let off = ib_start + idx * 4;
-        ib[idx] = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-            as i64;
+        ib[idx] = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]) as i64;
     }
     let shortlink_len = (UFS_NDADDR + UFS_NIADDR) * 4;
     let shortlink = buf[db_start..db_start + shortlink_len].to_vec();
@@ -1771,8 +1771,8 @@ mod tests {
     extern crate std;
 
     use super::{
-        parse_superblock, probe_from_gpt, FsHeader, SBLOCKSIZE, SBLOCK_OFFSETS, FS_MAGIC_OFFSET,
-        FS_SBLOCKLOC_OFFSET, FS_UFS1_MAGIC, FS_UFS2_MAGIC, UfsKind,
+        FS_MAGIC_OFFSET, FS_SBLOCKLOC_OFFSET, FS_UFS1_MAGIC, FS_UFS2_MAGIC, FsHeader,
+        SBLOCK_OFFSETS, SBLOCKSIZE, UfsKind, parse_superblock, probe_from_gpt,
     };
 
     fn apply_fixture(text: &str, size: usize) -> alloc::vec::Vec<u8> {

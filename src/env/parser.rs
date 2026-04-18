@@ -97,7 +97,7 @@ mod tests {
 
     use alloc::string::ToString;
 
-    use super::{parse_loader_conf_text, parse_loader_env_text, EnvVar};
+    use super::{EnvVar, parse_loader_conf_text, parse_loader_env_text};
 
     #[test]
     fn test_parse_loader_env_text_basic() {

@@ -1,16 +1,16 @@
 extern crate alloc;
 
-use alloc::string::String;
-use uefi::boot::{self, AllocateType, MemoryType};
-use uefi::prelude::Status;
 use crate::env::loader::LoaderEnv;
 use crate::error::{BootError, Result};
 use crate::kernel::elf::LoadedKernelImage;
-use crate::kernel::{LoadedKernelImagePhys, KERNEL_PHYS_BASE};
 use crate::kernel::types::{
-    ModInfoMd, MODINFO_ADDR, MODINFO_END, MODINFO_METADATA, MODINFO_NAME, MODINFO_SIZE,
-    MODINFO_TYPE,
+    MODINFO_ADDR, MODINFO_END, MODINFO_METADATA, MODINFO_NAME, MODINFO_SIZE, MODINFO_TYPE,
+    ModInfoMd,
 };
+use crate::kernel::{KERNEL_PHYS_BASE, LoadedKernelImagePhys};
+use alloc::string::String;
+use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::prelude::Status;
 
 #[allow(dead_code)]
 const GDT_CODE64: u64 = 0x00af9a000000ffff;
@@ -23,9 +23,9 @@ const PT_LOAD: u32 = 1;
 type TrampolineFn = extern "sysv64" fn(u64, u64, u64, u64, u64, u64) -> !;
 
 pub fn should_handoff(env: &LoaderEnv) -> bool {
-    matches!(
+    !matches!(
         env.get("zhamel_handoff"),
-        Some("1") | Some("YES") | Some("yes") | Some("true")
+        Some("0") | Some("NO") | Some("no") | Some("false")
     )
 }
 
@@ -97,14 +97,11 @@ fn prepare_and_handoff(
             .checked_sub(KERNEL_PHYS_BASE)
             .ok_or(BootError::InvalidData("kernel base below KERNEL_PHYS_BASE"))?
     };
+    kernend = kernend.max(phys_base.saturating_add(max_module_end_offset(modules, phys_base)));
     let entry = select_kernel_entry(&kernel.info, kernel.entry);
-    let _entry_offset = kernel_entry_offset_with_phdrs(
-        &kernel.info,
-        kernel.base,
-        kernel.size,
-        entry,
-    )
-    .ok_or(BootError::InvalidData("kernel entry not within image"))?;
+    let _entry_offset =
+        kernel_entry_offset_with_phdrs(&kernel.info, kernel.base, kernel.size, entry)
+            .ok_or(BootError::InvalidData("kernel entry not within image"))?;
     let tramp = allocate_trampoline(if stage_copy { Some(0x3fff_ffff) } else { None })?;
     let jump_entry = entry;
     if stage_copy {
@@ -120,9 +117,14 @@ fn prepare_and_handoff(
                 }
             }
         }
+        kernend = kernend.max(max_module_end_offset(modules, 0));
     }
     let modulep_base = if stage_copy { 0 } else { phys_base };
-    let kernel_phys_base = if stage_copy { KERNEL_PHYS_BASE } else { kernel.base };
+    let kernel_phys_base = if stage_copy {
+        KERNEL_PHYS_BASE
+    } else {
+        kernel.base
+    };
     // Stage environment bytes separately; the kernel expects ENVP to be a
     // pointer to the env string, not the string content itself.
     let envp_phys = if let Some(env_bytes) = envp {
@@ -165,12 +167,16 @@ fn prepare_and_handoff(
     let modulep_offset = modulep_addr;
     let _kernel_phys_base = phys_base.saturating_add(KERNEL_PHYS_BASE);
     let modulep_end = md_align(modulep_addr.saturating_add(modulep_bytes.len() as u64));
-    let kernend_offset = modulep_end;
+    let kernend_offset = modulep_end.max(max_module_end_offset(modules, phys_base));
     if modulep_offset > u32::MAX as u64 || kernend_offset > u32::MAX as u64 {
         return Err(BootError::InvalidData("modulep/kernend offset overflow"));
     }
     modulep_bytes = crate::kernel::build_kernel_modulep_with_metadata_relocated(
-        if stage_copy { KERNEL_PHYS_BASE } else { kernel.base },
+        if stage_copy {
+            KERNEL_PHYS_BASE
+        } else {
+            kernel.base
+        },
         kernel.size as u64,
         modules,
         efi_map,
@@ -208,19 +214,17 @@ fn prepare_and_handoff(
     }
     let stack_phys = stack_top;
     let stack_arg = stack_phys;
-    let identity_gb = compute_identity_map_gb(
-        max_phys_addr_for_handoff(
-            kernel.base,
-            kernel.size as u64,
-            &staging,
-            &modulep_bytes,
-            modulep_addr,
-            stack_phys,
-            tramp.addr,
-            tramp.len,
-            modules,
-        ),
-    );
+    let identity_gb = compute_identity_map_gb(max_phys_addr_for_handoff(
+        kernel.base,
+        kernel.size as u64,
+        &staging,
+        &modulep_bytes,
+        modulep_addr,
+        stack_phys,
+        tramp.addr,
+        tramp.len,
+        modules,
+    ));
     let high_map_size = modulep_addr
         .saturating_add(modulep_bytes.len() as u64)
         .saturating_sub(modulep_base);
@@ -228,7 +232,11 @@ fn prepare_and_handoff(
         "handoff params: stage_copy={} staging_base=0x{:x} kernel_base=0x{:x} phys_base=0x{:x} modulep_addr=0x{:x} modulep_off=0x{:x} kernend_off=0x{:x} map_size=0x{:x}",
         stage_copy,
         staging.base,
-        if stage_copy { KERNEL_PHYS_BASE } else { kernel.base },
+        if stage_copy {
+            KERNEL_PHYS_BASE
+        } else {
+            kernel.base
+        },
         phys_base,
         modulep_addr,
         modulep_offset,
@@ -240,7 +248,11 @@ fn prepare_and_handoff(
     } else {
         allocate_pagetable(
             &kernel.info,
-            if stage_copy { KERNEL_PHYS_BASE } else { kernel.base },
+            if stage_copy {
+                KERNEL_PHYS_BASE
+            } else {
+                kernel.base
+            },
             kernel.size,
             entry,
             identity_gb,
@@ -271,6 +283,7 @@ fn prepare_and_handoff_staged(
 ) -> Result<()> {
     disable_watchdog();
     let stack_top = allocate_stack_below_1gb()?;
+    crate::kernel::prepare_modules_for_handoff(modules)?;
     let module_bytes: usize = modules.iter().map(|m| m.data_len).sum();
     let mut staging = allocate_staging(kernel.image.len().saturating_add(module_bytes))?;
     let stage_offset = staging.base.saturating_sub(KERNEL_PHYS_BASE);
@@ -278,13 +291,9 @@ fn prepare_and_handoff_staged(
 
     let _staged_kernel = staging.alloc_copy_at(0, &kernel.image)?;
     // Use the separate trampoline stack (outside staging) to avoid clobber.
-    let _entry_offset = kernel_entry_offset_with_phdrs(
-        &kernel.info,
-        kernel.base,
-        kernel.image.len(),
-        entry,
-    )
-    .ok_or(BootError::InvalidData("kernel entry not within image"))?;
+    let _entry_offset =
+        kernel_entry_offset_with_phdrs(&kernel.info, kernel.base, kernel.image.len(), entry)
+            .ok_or(BootError::InvalidData("kernel entry not within image"))?;
     let tramp = allocate_trampoline(Some(0x3fff_ffff))?;
     let _kernend = KERNEL_PHYS_BASE + kernel.image.len() as u64;
     for module in modules.iter_mut() {
@@ -307,7 +316,11 @@ fn prepare_and_handoff_staged(
         if !env_bytes.is_empty() {
             let staged = staging.alloc_copy(env_bytes)?;
             let phys = staged.saturating_sub(stage_offset);
-            log::warn!("envp: staged {} bytes at phys 0x{:x}", env_bytes.len(), phys);
+            log::warn!(
+                "envp: staged {} bytes at phys 0x{:x}",
+                env_bytes.len(),
+                phys
+            );
             Some(phys)
         } else {
             None
@@ -327,11 +340,13 @@ fn prepare_and_handoff_staged(
         howto,
     )
     .ok_or(BootError::InvalidData("modulep build failed"))?;
-    let modulep_addr = staging.alloc_copy(&modulep_bytes)?.saturating_sub(stage_offset);
+    let modulep_addr = staging
+        .alloc_copy(&modulep_bytes)?
+        .saturating_sub(stage_offset);
     let modulep_offset = modulep_addr;
     let kernel_phys_base = phys_base.saturating_add(KERNEL_PHYS_BASE);
     let modulep_end = md_align(modulep_addr.saturating_add(modulep_bytes.len() as u64));
-    let kernend_offset = modulep_end;
+    let kernend_offset = modulep_end.max(max_module_end_offset(modules, phys_base));
     if modulep_offset > u32::MAX as u64 || kernend_offset > u32::MAX as u64 {
         return Err(BootError::InvalidData("modulep/kernend offset overflow"));
     }
@@ -368,19 +383,17 @@ fn prepare_and_handoff_staged(
     }
     let stack_phys = stack_top;
     let stack_arg = stack_phys;
-    let _identity_gb = compute_identity_map_gb(
-        max_phys_addr_for_handoff(
-            KERNEL_PHYS_BASE,
-            kernel.image.len() as u64,
-            &staging,
-            &modulep_bytes,
-            modulep_addr,
-            stack_phys,
-            tramp.addr,
-            tramp.len,
-            modules,
-        ),
-    );
+    let _identity_gb = compute_identity_map_gb(max_phys_addr_for_handoff(
+        KERNEL_PHYS_BASE,
+        kernel.image.len() as u64,
+        &staging,
+        &modulep_bytes,
+        modulep_addr,
+        stack_phys,
+        tramp.addr,
+        tramp.len,
+        modules,
+    ));
     let high_map_size = modulep_addr
         .saturating_add(modulep_bytes.len() as u64)
         .saturating_sub(0);
@@ -533,7 +546,13 @@ fn log_modulep_summary(buf: &[u8]) {
                 x if x == ModInfoMd::Howto as u32 => "Howto",
                 _ => "Metadata",
             };
-            log::warn!("modulep: md={} type=0x{:x} size=0x{:x} value=0x{:x}", label, md_type, size, value);
+            log::warn!(
+                "modulep: md={} type=0x{:x} size=0x{:x} value=0x{:x}",
+                label,
+                md_type,
+                size,
+                value
+            );
         }
         let mut next = offset + 8 + size;
         let rem = next % 8;
@@ -569,13 +588,28 @@ fn allocate_stack_with_max(max_addr: u64) -> Result<u64> {
         MemoryType::LOADER_DATA,
         1,
     )
-        .map_err(|err| BootError::Uefi(err.status()))?;
+    .map_err(|err| BootError::Uefi(err.status()))?;
     Ok(addr.as_ptr() as u64 + boot::PAGE_SIZE as u64 - 8)
 }
 
 fn md_align(addr: u64) -> u64 {
     let mask = boot::PAGE_SIZE as u64 - 1;
     (addr + mask) & !mask
+}
+
+fn max_module_end_offset(modules: &[crate::kernel::module::Module], phys_base: u64) -> u64 {
+    modules
+        .iter()
+        .filter_map(|module| {
+            let addr = module.phys_addr?;
+            if addr < phys_base {
+                return None;
+            }
+            let offset = addr - phys_base;
+            Some(md_align(offset.saturating_add(module.data_len as u64)))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 struct TrampolineImage {
@@ -637,29 +671,29 @@ fn build_trampoline() -> Result<TrampolineImage> {
     // Emit r14 low byte as two hex nibbles so we can see the exact value.
     // high nibble of r14's low byte:
     code.extend_from_slice(&[0x4c, 0x89, 0xf0]); // mov rax, r14
-    code.extend_from_slice(&[0x24, 0xff]);         // and al, 0xff
-    code.extend_from_slice(&[0xc0, 0xe8, 0x04]);   // shr al, 4
-    code.extend_from_slice(&[0x04, 0x30]);          // add al, '0'
-    code.extend_from_slice(&[0x3c, 0x3a]);          // cmp al, ':'
+    code.extend_from_slice(&[0x24, 0xff]); // and al, 0xff
+    code.extend_from_slice(&[0xc0, 0xe8, 0x04]); // shr al, 4
+    code.extend_from_slice(&[0x04, 0x30]); // add al, '0'
+    code.extend_from_slice(&[0x3c, 0x3a]); // cmp al, ':'
     {
         // if al >= ':', add 'a'-'0'-10 = 39
         let skip = 2u8; // bytes in the add al, 39 instruction
-        code.extend_from_slice(&[0x72, skip]);      // jb .skip_hex
-        code.extend_from_slice(&[0x04, 39]);        // add al, 39  ('a'-'0'-10)
+        code.extend_from_slice(&[0x72, skip]); // jb .skip_hex
+        code.extend_from_slice(&[0x04, 39]); // add al, 39  ('a'-'0'-10)
     }
     code.extend_from_slice(&[0xba, 0xf8, 0x03, 0x00, 0x00]); // mov edx, 0x3f8
-    code.extend_from_slice(&[0xee]);                // out dx, al
+    code.extend_from_slice(&[0xee]); // out dx, al
     // low nibble of r14's low byte:
     code.extend_from_slice(&[0x4c, 0x89, 0xf0]); // mov rax, r14
-    code.extend_from_slice(&[0x24, 0x0f]);         // and al, 0x0f
-    code.extend_from_slice(&[0x04, 0x30]);          // add al, '0'
-    code.extend_from_slice(&[0x3c, 0x3a]);          // cmp al, ':'
+    code.extend_from_slice(&[0x24, 0x0f]); // and al, 0x0f
+    code.extend_from_slice(&[0x04, 0x30]); // add al, '0'
+    code.extend_from_slice(&[0x3c, 0x3a]); // cmp al, ':'
     {
         let skip = 2u8;
-        code.extend_from_slice(&[0x72, skip]);      // jb .skip_hex
-        code.extend_from_slice(&[0x04, 39]);        // add al, 39
+        code.extend_from_slice(&[0x72, skip]); // jb .skip_hex
+        code.extend_from_slice(&[0x04, 39]); // add al, 39
     }
-    code.extend_from_slice(&[0xee]);                // out dx, al (edx still 0x3f8)
+    code.extend_from_slice(&[0xee]); // out dx, al (edx still 0x3f8)
     code.extend_from_slice(&[0x41, 0x54]); // push r12 (kernend)
     emit_outb(&mut code, 0x3f8 + 0, b'1');
     code.extend_from_slice(&[0x49, 0xc1, 0xe5, 0x20]); // shl r13, 32
@@ -668,16 +702,11 @@ fn build_trampoline() -> Result<TrampolineImage> {
     emit_outb(&mut code, 0x3f8 + 0, b'3');
     code.extend_from_slice(&[0x41, 0x57]); // push r15 (entry)
     emit_outb(&mut code, 0x3f8 + 0, b'4');
-    // Switch to our staged page tables.
-    // IMPORTANT: emit_outb uses `mov al, imm8` which clobbers AL (part of RAX).
-    // All serial markers must go AFTER mov cr3, rax, never between loading
-    // the page-table base into RAX and writing it to CR3.
+    // Switch to our staged page tables and enter the kernel immediately.
+    // Keep this tail byte-for-byte close to FreeBSD's amd64_tramp.S: once CR3
+    // changes, avoid diagnostics that clobber the register state seen by locore.
     code.extend_from_slice(&[0x4c, 0x89, 0xf0]); // mov rax, r14
     code.extend_from_slice(&[0x0f, 0x22, 0xd8]); // mov cr3, rax  (switch page tables)
-    emit_outb(&mut code, 0x3f8 + 0, b'5');
-    code.extend_from_slice(&[0x49, 0x8b, 0x07]); // mov rax, [r15]
-    emit_outb(&mut code, 0x3f8 + 0, b'8');
-    emit_outb(&mut code, 0x3f8 + 0, b'J');
     code.push(0xc3); // ret
     Ok(TrampolineImage { bytes: code })
 }
@@ -718,8 +747,7 @@ fn allocate_pagetable(
             let pd = (pd_base + (i as u64 * PAGE_SIZE)) as *mut u64;
             *pdpt_low.add(i) = (pd as u64) | PTE_PRESENT | PTE_RW;
             for j in 0..512u64 {
-                let entry =
-                    (i as u64 * ONE_GB) + (j * TWO_MB) | PTE_PRESENT | PTE_RW | PTE_PS;
+                let entry = (i as u64 * ONE_GB) + (j * TWO_MB) | PTE_PRESENT | PTE_RW | PTE_PS;
                 *pd.add(j as usize) = entry;
             }
         }
@@ -810,8 +838,7 @@ fn allocate_pagetable_staged() -> Result<u64> {
         // kernel sits.  Low VAs also wrap to 0..2GB.  Page tables are
         // within 0..2GB so they are identity-mapped.
         for i in 0..512usize {
-            *pdpt.add(i) = (if i % 2 == 0 { pd0 } else { pd1 } as u64)
-                | PTE_PRESENT | PTE_RW;
+            *pdpt.add(i) = (if i % 2 == 0 { pd0 } else { pd1 } as u64) | PTE_PRESENT | PTE_RW;
         }
         for i in 0..512usize {
             *pd0.add(i) = (i as u64 * TWO_MB) | PTE_PRESENT | PTE_RW | PTE_PS;
@@ -841,7 +868,9 @@ fn max_phys_addr_for_handoff(
     if modulep_end > max_addr {
         max_addr = modulep_end;
     }
-    let stack_base = stack_phys.saturating_add(8).saturating_sub(boot::PAGE_SIZE as u64);
+    let stack_base = stack_phys
+        .saturating_add(8)
+        .saturating_sub(boot::PAGE_SIZE as u64);
     if stack_base.saturating_add(boot::PAGE_SIZE as u64) > max_addr {
         max_addr = stack_base.saturating_add(boot::PAGE_SIZE as u64);
     }
@@ -900,9 +929,10 @@ fn map_kernel_image_range(
     // the physical address directly from the PDE (it expects PG_PS).
     let map_range_2m = |pdpt: *mut u64, vstart: u64, pstart: u64, size: u64| -> Result<()> {
         let mut vaddr = vstart & !(TWO_MB - 1);
-        let vend = (vstart + size + TWO_MB - 1) & !(TWO_MB - 1);
+        let total = (size + TWO_MB - 1) & !(TWO_MB - 1);
         let mut paddr = pstart & !(TWO_MB - 1);
-        while vaddr < vend {
+        let mut mapped = 0u64;
+        while mapped < total {
             let pml4_idx = ((vaddr >> 39) & 0x1ff) as usize;
             if pml4_idx != 511 {
                 return Err(BootError::InvalidData("kernel vaddr outside higher-half"));
@@ -937,23 +967,30 @@ fn map_kernel_image_range(
 
             vaddr = vaddr.saturating_add(TWO_MB);
             paddr = paddr.saturating_add(TWO_MB);
+            mapped = mapped.saturating_add(TWO_MB);
         }
         Ok(())
     };
 
     let kernel_virt_base = KERNBASE.saturating_add(KERNEL_PHYS_BASE);
     let map_size = core::cmp::max(
-        KERNEL_PHYS_BASE.saturating_add(kernel_size as u64),
-        high_map_size,
+        2 * 1024 * 1024 * 1024,
+        core::cmp::max(
+            KERNEL_PHYS_BASE.saturating_add(kernel_size as u64),
+            high_map_size,
+        ),
     );
-    let kernel_range_end = KERNBASE
-        .checked_add(map_size)
-        .ok_or(BootError::InvalidData("kernel range overflow"))?;
-    if kernel_entry < kernel_virt_base || kernel_entry >= kernel_range_end {
+    let kernel_range_end = KERNBASE.checked_add(map_size);
+    if kernel_entry < kernel_virt_base || kernel_range_end.is_some_and(|end| kernel_entry >= end) {
         return Err(BootError::InvalidData("kernel entry not within image"));
     }
 
     let phys_base = kernel_base.saturating_sub(KERNEL_PHYS_BASE);
+    log::warn!(
+        "handoff high map: phys_base=0x{:x} size=0x{:x}",
+        phys_base,
+        map_size
+    );
     map_range_2m(pdpt, KERNBASE, phys_base, map_size)?;
 
     Ok(())
@@ -999,10 +1036,8 @@ fn allocate_modulep_at(base: u64, data: &[u8]) -> Result<u64> {
         pages,
     ) {
         Ok(addr) => addr,
-        Err(_) => {
-            boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
-                .map_err(|err| BootError::Uefi(err.status()))?
-        }
+        Err(_) => boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+            .map_err(|err| BootError::Uefi(err.status()))?,
     };
     let addr = addr.as_ptr() as u64;
     if addr < base {
@@ -1065,13 +1100,15 @@ fn kernel_entry_offset_with_phdrs(
         if entry < vbase || entry >= vend {
             continue;
         }
-        let offset = phdr
-            .offset
-            .saturating_add(entry.saturating_sub(vbase));
+        let offset = phdr.offset.saturating_add(entry.saturating_sub(vbase));
         if offset < size as u64 {
             return Some(offset);
         }
-        let pbase = if phdr.paddr != 0 { phdr.paddr } else { phdr.vaddr };
+        let pbase = if phdr.paddr != 0 {
+            phdr.paddr
+        } else {
+            phdr.vaddr
+        };
         let entry_phys = pbase.saturating_add(entry.saturating_sub(vbase));
         if entry_phys < base || entry_phys >= end {
             continue;
@@ -1155,10 +1192,10 @@ fn stage_kernel_and_modules(
     staging.kernel_base = KERNEL_PHYS_BASE;
     for module in modules.iter_mut() {
         if let Some(src) = module.phys_addr {
-        let staged = staging.alloc_copy_from_phys(src, module.data_len)?;
+            let staged = staging.alloc_copy_from_phys(src, module.data_len)?;
             module.set_physical_address(staged);
         } else {
-        let staged = staging.alloc_copy(&module.data)?;
+            let staged = staging.alloc_copy(&module.data)?;
             module.set_physical_address(staged);
         }
     }

@@ -24,15 +24,17 @@ struct DirEntry {
     flags: u8,
 }
 
-pub fn probe_iso9660(
-    block: &BlockIO,
-    media_id: u32,
-    block_size: usize,
-) -> Option<IsoVolume> {
+pub fn probe_iso9660(block: &BlockIO, media_id: u32, block_size: usize) -> Option<IsoVolume> {
     if block_size == 0 || ISO_SECTOR_SIZE % block_size != 0 {
         return None;
     }
-    let buf = read_bytes(block, media_id, block_size, PVD_LBA * ISO_SECTOR_SIZE as u64, PVD_SIZE)?;
+    let buf = read_bytes(
+        block,
+        media_id,
+        block_size,
+        PVD_LBA * ISO_SECTOR_SIZE as u64,
+        PVD_SIZE,
+    )?;
     parse_pvd(&buf)
 }
 
@@ -144,7 +146,13 @@ fn find_entry(
         if current.flags & 0x02 == 0 {
             return None;
         }
-        let entries = read_directory(block, media_id, block_size, current.extent_lba, current.size)?;
+        let entries = read_directory(
+            block,
+            media_id,
+            block_size,
+            current.extent_lba,
+            current.size,
+        )?;
         let needle = normalize_name(part);
         let mut found = None;
         for entry in entries {
@@ -252,7 +260,6 @@ fn read_bytes(
     offset: u64,
     len: usize,
 ) -> Option<Vec<u8>> {
-    
     if len == 0 || block_size == 0 {
         return Some(Vec::new());
     }
@@ -357,7 +364,7 @@ fn read_into(
             );
         }
         out_offset += chunk_len;
-        
+
         _chunk_index += 1;
 
         current_lba = current_lba.saturating_add(chunk_blocks as u64);
@@ -387,7 +394,11 @@ fn compute_max_blocks_per_read(len: usize, block_size: usize, block: &BlockIO) -
     } else {
         1024usize
     };
-    let mut desired = if len <= min_bytes { len } else { len / target_calls };
+    let mut desired = if len <= min_bytes {
+        len
+    } else {
+        len / target_calls
+    };
     if desired < min_bytes {
         desired = min_bytes;
     }
@@ -406,8 +417,8 @@ mod tests {
     extern crate alloc;
     extern crate std;
 
-    use alloc::vec::Vec;
     use super::{normalize_name, parse_dir_record, parse_pvd};
+    use alloc::vec::Vec;
 
     fn make_dir_record(name: &str, extent_lba: u32, size: u32, flags: u8) -> Vec<u8> {
         let name_bytes = name.as_bytes();
