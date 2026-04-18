@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::error::{BootError, Result};
-use crate::zfs::reader::dnode::{dnode_read, DnodePhys};
+use crate::zfs::reader::dnode::{DnodePhys, dnode_read};
 use uefi::proto::media::block::BlockIO;
 
 const DNODE_SIZE: usize = 512;

@@ -5,14 +5,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::error::{BootError, Result};
-use uefi::runtime::{self, VariableVendor};
 use uefi::CStr16;
+use uefi::runtime::{self, VariableVendor};
 
 use crate::uefi_helpers::device_path_text_from_bytes;
 
 const EFI_GLOBAL_VARIABLE_GUID: [u8; 16] = [
-    0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03,
-    0x2b, 0x8c,
+    0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c,
 ];
 
 pub trait FirmwareVariables {
@@ -154,8 +153,8 @@ struct UefiFirmwareVars;
 impl FirmwareVariables for UefiFirmwareVars {
     fn read(&self, name: &str, _vendor: [u8; 16]) -> Result<Vec<u8>> {
         let mut buf = [0u16; 64];
-        let name =
-            CStr16::from_str_with_buf(name, &mut buf).map_err(|_| BootError::InvalidData("bad var name"))?;
+        let name = CStr16::from_str_with_buf(name, &mut buf)
+            .map_err(|_| BootError::InvalidData("bad var name"))?;
         let (data, _attrs) = runtime::get_variable_boxed(name, &VariableVendor::GLOBAL_VARIABLE)
             .map_err(|err| BootError::Uefi(err.status()))?;
         Ok(data.into_vec())
@@ -170,7 +169,7 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec::Vec;
 
-    use super::{collect_from_vars, parse_boot_entry, parse_u16_list, FirmwareVariables};
+    use super::{FirmwareVariables, collect_from_vars, parse_boot_entry, parse_u16_list};
     use crate::error::Result;
 
     struct FakeVars {
@@ -204,7 +203,9 @@ mod tests {
 
     #[test]
     fn test_parse_u16_list_rejects_unaligned() {
-        let err = parse_u16_list("BootOrder", &[0x12]).err().expect("expected error");
+        let err = parse_u16_list("BootOrder", &[0x12])
+            .err()
+            .expect("expected error");
         let _ = err;
     }
 
@@ -216,7 +217,10 @@ mod tests {
         assert_eq!(entry.attributes, 0x00000001);
         assert_eq!(entry.description, Some("Test".to_string()));
         assert_eq!(entry.device_path, Some("device_path_bytes=4".to_string()));
-        assert_eq!(entry.file_path_bytes.as_deref(), Some(&[0x01, 0x02, 0x03, 0x04][..]));
+        assert_eq!(
+            entry.file_path_bytes.as_deref(),
+            Some(&[0x01, 0x02, 0x03, 0x04][..])
+        );
     }
 
     #[test]

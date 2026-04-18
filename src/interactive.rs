@@ -1,8 +1,8 @@
 use uefi::boot::{self, EventType, TimerTrigger, Tpl};
 use uefi::system;
 
-use crate::env::loader::LoaderEnv;
 use crate::commands;
+use crate::env::loader::LoaderEnv;
 use uefi::Status;
 
 pub fn fail_timeout_interrupt(env: &LoaderEnv, reason: &str) -> bool {
@@ -130,10 +130,11 @@ fn wait_for_key_or_timeout(seconds: u64) -> bool {
         let Some(key_event) = stdin.wait_for_key_event() else {
             return;
         };
-        let timer = match unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) } {
-            Ok(timer) => timer,
-            Err(_) => return,
-        };
+        let timer =
+            match unsafe { boot::create_event(EventType::TIMER, Tpl::APPLICATION, None, None) } {
+                Ok(timer) => timer,
+                Err(_) => return,
+            };
         let _ = boot::set_timer(&timer, TimerTrigger::Relative(seconds * 10_000_000));
         let timer_wait = unsafe { timer.unsafe_clone() };
         let mut events = [key_event, timer_wait];

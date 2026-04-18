@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::error::{BootError, Result};
 use crate::zfs::reader::io::read_block;
-use crate::zfs::reader::types::{bp_is_hole, BlkPtr, SPA_MINBLOCKSHIFT, SPA_BLKPTRSHIFT};
+use crate::zfs::reader::types::{BlkPtr, SPA_BLKPTRSHIFT, SPA_MINBLOCKSHIFT, bp_is_hole};
 use uefi::proto::media::block::BlockIO;
 
 const DNODE_CORE_SIZE: usize = 64;
@@ -150,7 +150,9 @@ fn parse_dnode(bytes: &[u8]) -> Result<DnodePhys> {
         if offset + super::types::BLK_PTR_SIZE > total_size {
             return Err(BootError::InvalidData("dnode blkptr overflow"));
         }
-        blkptrs.push(BlkPtr::from_bytes(&bytes[offset..offset + super::types::BLK_PTR_SIZE])?);
+        blkptrs.push(BlkPtr::from_bytes(
+            &bytes[offset..offset + super::types::BLK_PTR_SIZE],
+        )?);
         offset += super::types::BLK_PTR_SIZE;
     }
 
@@ -288,8 +290,8 @@ fn parse_blkptrs_with_data(data: &[u8]) -> Result<Vec<BlkPtr>> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
     use super::DnodePhys;
+    use alloc::vec;
 
     #[test]
     fn parse_dnode_header() {

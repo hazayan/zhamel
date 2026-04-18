@@ -4,13 +4,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use uefi::boot::{self, SearchType};
-use uefi::runtime::{self, VariableVendor};
-use uefi::table::cfg::ConfigTableEntry;
 use uefi::CStr16;
-use uefi::proto::console::gop::GraphicsOutput;
 use uefi::Identify;
+use uefi::boot::{self, SearchType};
+use uefi::proto::console::gop::GraphicsOutput;
+use uefi::runtime::{self, VariableVendor};
 use uefi::system;
+use uefi::table::cfg::ConfigTableEntry;
 
 use crate::env::loader::LoaderEnv;
 
@@ -41,7 +41,11 @@ pub fn init(loader_env: &mut LoaderEnv) {
             gop_present
         );
     }
-    select_console(loader_env, acpi.serial_present || conout_serial, gop_present);
+    select_console(
+        loader_env,
+        acpi.serial_present || conout_serial,
+        gop_present,
+    );
 }
 
 struct AcpiInfo {
@@ -81,7 +85,7 @@ fn detect_acpi(loader_env: &mut LoaderEnv) -> AcpiInfo {
             return AcpiInfo {
                 serial_present: false,
                 no_vga: false,
-            }
+            };
         }
     };
 
@@ -144,7 +148,11 @@ fn select_console(loader_env: &mut LoaderEnv, serial_present: bool, gop_present:
 
     let console = loader_env.get("console").unwrap_or("efi");
     if !gop_present && console == "efi" {
-        let console_value = if trial { "comconsole" } else { "efi,comconsole" };
+        let console_value = if trial {
+            "comconsole"
+        } else {
+            "efi,comconsole"
+        };
         loader_env.set("console", console_value);
         let howto = if console_value == "comconsole" {
             RB_SERIAL
@@ -166,10 +174,7 @@ fn select_console(loader_env: &mut LoaderEnv, serial_present: bool, gop_present:
         }
         return;
     }
-    let console = loader_env
-        .get("console")
-        .unwrap_or("efi")
-        .to_string();
+    let console = loader_env.get("console").unwrap_or("efi").to_string();
     if console.contains("comconsole") {
         if trial {
             ensure_serial_hints(loader_env);
@@ -333,11 +338,17 @@ unsafe fn read_spcr(ptr: *const SdtHeader) -> Option<SpcrInfo> {
         return None;
     }
     let header = unsafe { ptr.read_unaligned() };
-    if header.length < core::mem::size_of::<SdtHeader>() as u32 + core::mem::size_of::<GenericAddress>() as u32 {
+    if header.length
+        < core::mem::size_of::<SdtHeader>() as u32 + core::mem::size_of::<GenericAddress>() as u32
+    {
         return None;
     }
     let serial_offset = core::mem::size_of::<SdtHeader>() + 4;
-    let serial_ptr = unsafe { (ptr as *const u8).add(serial_offset).cast::<GenericAddress>() };
+    let serial_ptr = unsafe {
+        (ptr as *const u8)
+            .add(serial_offset)
+            .cast::<GenericAddress>()
+    };
     let serial = unsafe { serial_ptr.read_unaligned() };
     Some(SpcrInfo {
         serial_port_address: serial.address,
@@ -375,7 +386,8 @@ fn conout_has_serial() -> Option<bool> {
 fn read_global_device_path(name: &str) -> Option<Vec<u8>> {
     let mut buf = [0u16; 16];
     let name = CStr16::from_str_with_buf(name, &mut buf).ok()?;
-    let (data, _attrs) = runtime::get_variable_boxed(name, &VariableVendor::GLOBAL_VARIABLE).ok()?;
+    let (data, _attrs) =
+        runtime::get_variable_boxed(name, &VariableVendor::GLOBAL_VARIABLE).ok()?;
     Some(data.into_vec())
 }
 

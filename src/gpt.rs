@@ -50,10 +50,7 @@ pub fn scan_gpt_disks(devices: &[BlockDeviceInfo]) -> Vec<GptDisk> {
     disks
 }
 
-pub fn find_partition_by_guid<'a>(
-    disks: &'a [GptDisk],
-    guid: [u8; 16],
-) -> Option<GptMatch<'a>> {
+pub fn find_partition_by_guid<'a>(disks: &'a [GptDisk], guid: [u8; 16]) -> Option<GptMatch<'a>> {
     for (disk_index, disk) in disks.iter().enumerate() {
         for partition in &disk.partitions {
             if partition.unique_guid == guid {
@@ -81,7 +78,7 @@ pub fn partition_kind(type_guid: [u8; 16]) -> GptPartitionKind {
 }
 
 fn scan_partitions(device: &BlockDeviceInfo) -> Vec<GptPartition> {
-        let block = match open_block_io(device.handle) {
+    let block = match open_block_io(device.handle) {
         Ok(block) => block,
         Err(err) => {
             log::warn!("gpt: open BlockIO failed: {:?}", err.status());
@@ -102,9 +99,7 @@ fn scan_partitions(device: &BlockDeviceInfo) -> Vec<GptPartition> {
         None => return Vec::new(),
     };
 
-    let entry_bytes = hdr
-        .num_entries
-        .saturating_mul(hdr.entry_size as u64) as usize;
+    let entry_bytes = hdr.num_entries.saturating_mul(hdr.entry_size as u64) as usize;
     let capped_entries = core::cmp::min(hdr.num_entries, GPT_ENTRY_LIMIT);
     if capped_entries != hdr.num_entries {
         log::warn!(
@@ -267,16 +262,13 @@ pub(crate) const GPT_ENTRY_MIN_SIZE: usize = 128;
 const GPT_ENTRY_LIMIT: u64 = 128;
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const GPT_TYPE_EFI_SYSTEM: [u8; 16] = [
-    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
-    0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
 ];
 const GPT_TYPE_FREEBSD_UFS: [u8; 16] = [
-    0xB6, 0x7C, 0x6E, 0x51, 0xCF, 0x6E, 0xD6, 0x11,
-    0x8F, 0xF8, 0x00, 0x02, 0x2D, 0x09, 0x71, 0x2B,
+    0xB6, 0x7C, 0x6E, 0x51, 0xCF, 0x6E, 0xD6, 0x11, 0x8F, 0xF8, 0x00, 0x02, 0x2D, 0x09, 0x71, 0x2B,
 ];
 const GPT_TYPE_FREEBSD_ZFS: [u8; 16] = [
-    0xBA, 0x7C, 0x6E, 0x51, 0xCF, 0x6E, 0xD6, 0x11,
-    0x8F, 0xF8, 0x00, 0x02, 0x2D, 0x09, 0x71, 0x2B,
+    0xBA, 0x7C, 0x6E, 0x51, 0xCF, 0x6E, 0xD6, 0x11, 0x8F, 0xF8, 0x00, 0x02, 0x2D, 0x09, 0x71, 0x2B,
 ];
 
 #[cfg(test)]
@@ -295,15 +287,8 @@ mod tests {
     extern crate std;
 
     use super::{
-        parse_header,
-        parse_partition,
-        partition_kind,
-        GptPartitionKind,
-        GPT_ENTRY_MIN_SIZE,
-        GPT_SIGNATURE,
-        GPT_TYPE_EFI_SYSTEM,
-        GPT_TYPE_FREEBSD_UFS,
-        GPT_TYPE_FREEBSD_ZFS,
+        GPT_ENTRY_MIN_SIZE, GPT_SIGNATURE, GPT_TYPE_EFI_SYSTEM, GPT_TYPE_FREEBSD_UFS,
+        GPT_TYPE_FREEBSD_ZFS, GptPartitionKind, parse_header, parse_partition, partition_kind,
     };
 
     #[test]
@@ -331,10 +316,18 @@ mod tests {
 
     #[test]
     fn test_partition_kind() {
-        assert_eq!(partition_kind(GPT_TYPE_EFI_SYSTEM), GptPartitionKind::EfiSystem);
-        assert_eq!(partition_kind(GPT_TYPE_FREEBSD_UFS), GptPartitionKind::FreeBsdUfs);
-        assert_eq!(partition_kind(GPT_TYPE_FREEBSD_ZFS), GptPartitionKind::FreeBsdZfs);
+        assert_eq!(
+            partition_kind(GPT_TYPE_EFI_SYSTEM),
+            GptPartitionKind::EfiSystem
+        );
+        assert_eq!(
+            partition_kind(GPT_TYPE_FREEBSD_UFS),
+            GptPartitionKind::FreeBsdUfs
+        );
+        assert_eq!(
+            partition_kind(GPT_TYPE_FREEBSD_ZFS),
+            GptPartitionKind::FreeBsdZfs
+        );
         assert_eq!(partition_kind([0u8; 16]), GptPartitionKind::Other);
     }
-
 }

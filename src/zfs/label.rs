@@ -55,9 +55,7 @@ pub fn probe_vdev_labels(
         }
     }
     if labels.is_empty() {
-        return Err(last_err.unwrap_or(BootError::InvalidData(
-            "vdev labels not found",
-        )));
+        return Err(last_err.unwrap_or(BootError::InvalidData("vdev labels not found")));
     }
     Ok(labels)
 }
@@ -274,8 +272,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{
-        parse_bootenv_block, parse_vdev_phys, BootEnv, VDEV_PAD_SIZE, VDEV_PHYS_SIZE,
-        VDEV_BOOTENV_DATA_SIZE, ZIO_ECK_SIZE,
+        BootEnv, VDEV_BOOTENV_DATA_SIZE, VDEV_PAD_SIZE, VDEV_PHYS_SIZE, ZIO_ECK_SIZE,
+        parse_bootenv_block, parse_vdev_phys,
     };
     use crate::zfs::sha256::Sha256;
 

@@ -23,18 +23,10 @@ pub fn parse_mbr(buf: &[u8]) -> Option<Vec<MbrPartition>> {
     for idx in 0..4u8 {
         let off = base + (idx as usize) * 16;
         let type_id = buf[off + 4];
-        let first_lba = u32::from_le_bytes([
-            buf[off + 8],
-            buf[off + 9],
-            buf[off + 10],
-            buf[off + 11],
-        ]);
-        let size_lba = u32::from_le_bytes([
-            buf[off + 12],
-            buf[off + 13],
-            buf[off + 14],
-            buf[off + 15],
-        ]);
+        let first_lba =
+            u32::from_le_bytes([buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11]]);
+        let size_lba =
+            u32::from_le_bytes([buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15]]);
         if type_id == 0 || size_lba == 0 {
             continue;
         }

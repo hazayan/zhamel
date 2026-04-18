@@ -17,7 +17,7 @@ impl fmt::Display for ModuleType {
         match self {
             ModuleType::ElfKernel => write!(f, "elf kernel"),
             ModuleType::ElfModule => write!(f, "elf module"),
-            ModuleType::ElfObj => write!(f, "elf obj"),
+            ModuleType::ElfObj => write!(f, "elf obj module"),
             ModuleType::Raw(name) => write!(f, "{}", name),
         }
     }
@@ -65,7 +65,7 @@ mod tests {
     fn test_module_type_display() {
         assert_eq!(ModuleType::ElfKernel.to_string(), "elf kernel");
         assert_eq!(ModuleType::ElfModule.to_string(), "elf module");
-        assert_eq!(ModuleType::ElfObj.to_string(), "elf obj");
+        assert_eq!(ModuleType::ElfObj.to_string(), "elf obj module");
         assert_eq!(ModuleType::Raw("custom".to_string()).to_string(), "custom");
     }
 }

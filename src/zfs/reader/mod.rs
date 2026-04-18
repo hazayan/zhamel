@@ -6,16 +6,18 @@ use uefi::proto::media::block::BlockIO;
 
 use crate::error::{BootError, Result};
 use crate::zfs::label::{self, VDEV_LABELS, VDEV_UBERBLOCK_RING};
-use crate::zfs::reader::types::{mmp_seq, mmp_seq_valid, mmp_valid, Uberblock, UBERBLOCK_MAGIC, UBERBLOCK_SIZE};
+use crate::zfs::reader::types::{
+    UBERBLOCK_MAGIC, UBERBLOCK_SIZE, Uberblock, mmp_seq, mmp_seq_valid, mmp_valid,
+};
 
-pub mod types;
 pub mod checksum;
-pub mod lz4;
-pub mod io;
 pub mod dnode;
-pub mod zap;
-pub mod objset;
+pub mod io;
+pub mod lz4;
 pub mod mos;
+pub mod objset;
+pub mod types;
+pub mod zap;
 
 const MAX_UBERBLOCK_SHIFT: u64 = 13;
 const UBERBLOCK_SHIFT: u64 = 10;
@@ -39,11 +41,8 @@ pub fn read_best_uberblock(
     let mut best: Option<Uberblock> = None;
     for label_idx in 0..VDEV_LABELS {
         for ring_idx in 0..count {
-            let offset = label::vdev_label_offset(
-                psize,
-                label_idx,
-                uberblock_offset(ub_shift, ring_idx),
-            )?;
+            let offset =
+                label::vdev_label_offset(psize, label_idx, uberblock_offset(ub_shift, ring_idx))?;
             let buf = read_bytes(block, media_id, block_size, offset, ub_size as usize)?;
             if let Some(ub) = parse_uberblock(&buf) {
                 if !ub.is_valid() {
@@ -95,7 +94,11 @@ fn uberblock_compare(left: &Uberblock, right: &Uberblock) -> i32 {
         return if left.txg > right.txg { 1 } else { -1 };
     }
     if left.timestamp != right.timestamp {
-        return if left.timestamp > right.timestamp { 1 } else { -1 };
+        return if left.timestamp > right.timestamp {
+            1
+        } else {
+            -1
+        };
     }
     let seq_left = if mmp_valid(left) && mmp_seq_valid(left) {
         mmp_seq(left)

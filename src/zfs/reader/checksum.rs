@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::error::{BootError, Result};
-use crate::zfs::reader::types::{bp_should_byteswap, BlkPtr, ZioCksum};
+use crate::zfs::reader::types::{BlkPtr, ZioCksum, bp_should_byteswap};
 use crate::zfs::sha256::Sha256;
 
 pub const ZIO_CHECKSUM_FLETCHER_4: u64 = 7;
@@ -43,9 +43,7 @@ fn fletcher4(data: &[u8], byteswap: bool) -> ZioCksum {
         c = c.wrapping_add(b);
         d = d.wrapping_add(c);
     }
-    ZioCksum {
-        word: [a, b, c, d],
-    }
+    ZioCksum { word: [a, b, c, d] }
 }
 
 fn sha256_cksum(data: &[u8], byteswap: bool) -> ZioCksum {

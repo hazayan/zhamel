@@ -11,7 +11,7 @@ use crate::env::parser::{parse_loader_conf_text, parse_loader_env_text};
 use crate::kernel::elf::ElfLoader;
 use crate::kernel::module::Module;
 use crate::kernel::modulep::ModulepBuilder;
-use crate::kernel::types::{ModuleType, MODINFO_ADDR, MODINFO_NAME, MODINFO_SIZE, MODINFO_TYPE};
+use crate::kernel::types::{MODINFO_ADDR, MODINFO_NAME, MODINFO_SIZE, MODINFO_TYPE, ModuleType};
 use crate::uefi_helpers::partition_guid_from_device_path_bytes;
 
 pub fn run() -> Status {
@@ -218,7 +218,9 @@ fn test_elf_loader() -> Result<(), String> {
     image[phdr + 48..phdr + 56].copy_from_slice(&0x200000u64.to_le_bytes());
 
     let loader = ElfLoader;
-    let info = loader.parse_kernel(&image).map_err(|_| "elf parse failed")?;
+    let info = loader
+        .parse_kernel(&image)
+        .map_err(|_| "elf parse failed")?;
     if info.program_headers.is_empty() {
         return Err("elf phdrs missing".into());
     }
@@ -232,7 +234,11 @@ fn qemu_exit(code: u32) -> ! {
     }
     runtime::reset(
         ResetType::SHUTDOWN,
-        if code == 0x10 { Status::SUCCESS } else { Status::ABORTED },
+        if code == 0x10 {
+            Status::SUCCESS
+        } else {
+            Status::ABORTED
+        },
         None,
     );
 }

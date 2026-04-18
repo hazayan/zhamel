@@ -12,10 +12,10 @@ use crate::uefi_helpers::device_path::{
     device_path_bytes_for_handle, device_path_has_cdrom, device_path_prefix_before_file_path,
 };
 use crate::uefi_helpers::partition_guid_from_device_path_bytes;
+use uefi::Handle;
 use uefi::boot::{self, OpenProtocolParams};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::network::snp::SimpleNetwork;
-use uefi::Handle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CurrDevSource {
@@ -400,7 +400,8 @@ fn image_iso_handle() -> Option<Handle> {
             return Some(found);
         }
     }
-    if let Some(text) = crate::uefi_helpers::device_path::device_path_text_for_loaded_image(handle) {
+    if let Some(text) = crate::uefi_helpers::device_path::device_path_text_for_loaded_image(handle)
+    {
         if let Some(found) = find_block_handle_by_device_path_text_prefix(&text) {
             return Some(found);
         }
