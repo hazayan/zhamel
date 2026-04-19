@@ -72,7 +72,11 @@ Integration assets:
 - OVMF firmware is cached under `tmp/integration/assets/ovmf/` when available from
   system packages (e.g. `/usr/share/edk2/x64`).
 - HTTP driver binaries for Tang unlock are built from edk2 into `tmp/edk2` when needed
-  (see `tools/edk2-build-network-drivers.sh`, which will clone edk2 if missing).
+  (see `tools/edk2-build-network-drivers.sh`, which will clone edk2 if missing). The build
+  forces `gEfiNetworkPkgTokenSpaceGuid.PcdAllowHttpConnections=TRUE` because Tang unlock uses
+  plain `http://` URLs unless TLS is configured separately. It also fixes the other `HttpDxe`
+  HTTP timeout, DNS retry, and transfer buffer PCDs at build time so the standalone DXE driver
+  can run without a platform PCD database.
 - To prefetch assets ahead of a test session:
 
 ```

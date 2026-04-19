@@ -16,6 +16,7 @@ use uefi::boot;
 use uefi::boot::{LoadImageSource, ScopedProtocol};
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::network::http::{Http, HttpBinding};
+use uefi::proto::network::ip4config2::Ip4Config2;
 use uefi::proto::network::snp::SimpleNetwork;
 use uefi::proto::rng::Rng;
 use uefi::{CString16, Handle, Status, cstr8};
@@ -23,6 +24,9 @@ use uefi_raw::Ipv4Address;
 use uefi_raw::protocol::network::http::{
     HttpAccessPoint, HttpConfigData, HttpHeader, HttpMessage, HttpMethod, HttpRequestData,
     HttpResponseData, HttpStatusCode, HttpToken, HttpV4AccessPoint, HttpVersion,
+};
+use uefi_raw::protocol::network::ip4_config2::{
+    Ip4Config2DataType, Ip4Config2ManualAddress, Ip4Config2Policy,
 };
 
 use crate::error::{BootError, Result};
@@ -162,6 +166,7 @@ fn fetch_adv(
 
 #[derive(Debug)]
 struct HttpClient {
+    nic_handle: Handle,
     child_handle: Handle,
     binding: ScopedProtocol<HttpBinding>,
     protocol: Option<ScopedProtocol<Http>>,
@@ -202,6 +207,7 @@ impl HttpClient {
             .map_err(|err| BootError::Uefi(err.status()))?
         };
         Ok(Self {
+            nic_handle,
             child_handle,
             binding,
             protocol: Some(protocol),
@@ -227,8 +233,30 @@ impl HttpClient {
         };
         if use_default {
             log::info!("tang: http ipv4 config using default addr");
+            let mut ip4 =
+                Ip4Config2::new(self.nic_handle).map_err(|err| BootError::Uefi(err.status()))?;
+            ip4.ifup().map_err(|err| {
+                log::warn!("tang: ipv4 dhcp setup failed: {}", err.status());
+                BootError::Uefi(err.status())
+            })?;
         } else {
             log::info!("tang: http ipv4 config static addr");
+            let mut ip4 =
+                Ip4Config2::new(self.nic_handle).map_err(|err| BootError::Uefi(err.status()))?;
+            ip4.set_policy(Ip4Config2Policy::STATIC)
+                .map_err(|err| BootError::Uefi(err.status()))?;
+            let mut manual = Ip4Config2ManualAddress {
+                address: local_address,
+                subnet_mask: local_subnet,
+            };
+            let data = unsafe {
+                core::slice::from_raw_parts_mut(
+                    (&mut manual as *mut Ip4Config2ManualAddress).cast::<u8>(),
+                    core::mem::size_of::<Ip4Config2ManualAddress>(),
+                )
+            };
+            ip4.set_data(Ip4Config2DataType::MANUAL_ADDRESS, data)
+                .map_err(|err| BootError::Uefi(err.status()))?;
         }
         let ip4 = HttpV4AccessPoint {
             use_default_addr: use_default.into(),
@@ -1075,6 +1103,112 @@ fn to_block(data: &[u8]) -> [u8; 16] {
     let len = core::cmp::min(data.len(), 16);
     out[..len].copy_from_slice(&data[..len]);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::format;
+    use alloc::string::{String, ToString};
+
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use serde_json::{Value, json};
+
+    use super::{parse_adv_jwk_set, parse_jwe_header};
+
+    fn compact_jwe_with_header(header: Value) -> String {
+        let header = serde_json::to_vec(&header).expect("header json");
+        format!("{}....", URL_SAFE_NO_PAD.encode(header))
+    }
+
+    #[test]
+    fn parse_jwe_header_accepts_kunci_tang_shape() {
+        let adv = json!({
+            "payload": URL_SAFE_NO_PAD.encode(br#"{"keys":[]}"#),
+            "signatures": []
+        });
+        let jwe = compact_jwe_with_header(json!({
+            "alg": "ECDH-ES",
+            "enc": "A256GCM",
+            "kid": "exchange-thumbprint",
+            "epk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": URL_SAFE_NO_PAD.encode([1u8; 32]),
+                "y": URL_SAFE_NO_PAD.encode([2u8; 32]),
+                "alg": "ECMR",
+                "key_ops": ["deriveKey"]
+            },
+            "clevis": {
+                "pin": "tang",
+                "tang": {
+                    "url": "http://tang.example",
+                    "adv": adv
+                }
+            }
+        }));
+
+        let header = parse_jwe_header(&jwe, None).expect("parse header");
+        assert_eq!(header.kid, "exchange-thumbprint");
+        assert_eq!(header.tang.url, "http://tang.example");
+        assert!(header.tang.adv.expect("adv").contains("\"payload\""));
+    }
+
+    #[test]
+    fn parse_jwe_header_allows_url_override() {
+        let jwe = compact_jwe_with_header(json!({
+            "kid": "exchange-thumbprint",
+            "epk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": URL_SAFE_NO_PAD.encode([1u8; 32]),
+                "y": URL_SAFE_NO_PAD.encode([2u8; 32])
+            },
+            "clevis": {
+                "pin": "tang",
+                "tang": {
+                    "url": "http://configured.example"
+                }
+            }
+        }));
+
+        let header = parse_jwe_header(&jwe, Some("http://override.example")).expect("parse header");
+        assert_eq!(header.tang.url, "http://override.example");
+    }
+
+    #[test]
+    fn parse_adv_accepts_kunci_json_advertisement() {
+        let adv = json!({
+            "payload": URL_SAFE_NO_PAD.encode(br#"{"keys":[]}"#),
+            "signatures": []
+        })
+        .to_string();
+
+        let set = parse_adv_jwk_set(&adv).expect("parse adv");
+        assert!(set.keys.is_empty());
+    }
+
+    #[test]
+    fn parse_jwe_header_rejects_non_tang_pin() {
+        let jwe = compact_jwe_with_header(json!({
+            "kid": "exchange-thumbprint",
+            "epk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": URL_SAFE_NO_PAD.encode([1u8; 32]),
+                "y": URL_SAFE_NO_PAD.encode([2u8; 32])
+            },
+            "clevis": {
+                "pin": "sss",
+                "tang": {
+                    "url": "http://tang.example"
+                }
+            }
+        }));
+
+        assert!(parse_jwe_header(&jwe, None).is_err());
+    }
 }
 
 struct Aes256Key {

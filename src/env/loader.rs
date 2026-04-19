@@ -402,7 +402,7 @@ fn delete_freebsd_var(name: &str) {
     }
 }
 
-const LOADER_ENV_DEFAULT: &str = "/efi/freebsd/loader.env";
+const LOADER_ENV_DEFAULT: &str = "/EFI/FreeBSD/loader.env";
 const FREEBSD_BOOT_VAR_GUID: Guid = Guid::from_bytes([
     0xCF, 0xEE, 0x69, 0xAD, 0xA0, 0xDE, 0x47, 0xA9, 0x93, 0xA8, 0xF6, 0x31, 0x06, 0xF8, 0xAE, 0x99,
 ]);

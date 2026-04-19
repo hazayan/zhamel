@@ -562,7 +562,7 @@ fn main() -> Status {
             Ok(module) => module,
             Err(err) => {
                 log::warn!("zfs native key handoff preparation failed: {}", err);
-                None
+                return Status::LOAD_ERROR;
             }
         };
         log::info!("zfs: starting module discovery from boot dataset");
@@ -590,7 +590,7 @@ fn main() -> Status {
                 Ok(module) => module,
                 Err(err) => {
                     log::warn!("zfs native key handoff preparation failed: {}", err);
-                    None
+                    return Status::LOAD_ERROR;
                 }
             };
             log::info!("zfs: starting module discovery from bootenv {}", bootonce);
