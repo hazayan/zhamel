@@ -81,8 +81,10 @@ pub fn maybe_unlock_kunci(env: &mut LoaderEnv, props: &DatasetProps) -> Result<(
     let local_ip = env.get("zfs_kunci_ip").and_then(parse_ipv4);
     let netmask = env.get("zfs_kunci_netmask").and_then(parse_ipv4);
     let key = tang::decrypt_tang_jwe(jwe, url_override, http_driver, local_ip, netmask)?;
-    if key.is_empty() {
-        return Err(BootError::InvalidData("kunci key empty"));
+    if key.len() != 32 {
+        return Err(BootError::InvalidData(
+            "kunci zfs key must be exactly 32 bytes",
+        ));
     }
     let hex = hex_encode(&key);
     env.set("kern.zfs.key", &hex);

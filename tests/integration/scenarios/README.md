@@ -19,7 +19,7 @@ expected because we deliberately omit unrelated assets (for speed and scope).
 Common, benign warnings
 -----------------------
 
-- "loader env missing: /efi/freebsd/loader.env"
+- "loader env missing: /EFI/FreeBSD/loader.env"
   Happens when a scenario does not provide a `loader.env` file.
 
 - "boot volume kernel read failed: /boot/kernel/kernel"
