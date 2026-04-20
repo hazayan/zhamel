@@ -166,13 +166,7 @@ fn select_console(loader_env: &mut LoaderEnv, serial_present: bool, gop_present:
         return;
     }
     if serial_present && console == "efi" {
-        loader_env.set("console", "efi,comconsole");
-        let howto = RB_SERIAL | RB_MULTIPLE;
-        loader_env.set("boot_howto", &howto.to_string());
-        if trial {
-            ensure_serial_hints(loader_env);
-        }
-        return;
+        log::info!("console: serial present, keeping video console primary");
     }
     let console = loader_env.get("console").unwrap_or("efi").to_string();
     if console.contains("comconsole") {

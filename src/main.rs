@@ -313,12 +313,20 @@ fn handle_kernel_image(
                     None
                 }
             };
+            let efi_fb = match kernel::collect_efi_framebuffer_metadata() {
+                Ok(fb) => Some(fb),
+                Err(err) => {
+                    log::warn!("efi framebuffer metadata unavailable: {}", err);
+                    None
+                }
+            };
             if handoff::should_handoff(loader_env) && stage_copy {
                 log::info!("stage_copy enabled; staging kernel/modules");
                 return Some(handoff::handoff_to_kernel_staged(
                     &loaded,
                     &mut modules,
                     efi_map.as_deref(),
+                    efi_fb.as_deref(),
                     Some(envp.as_slice()),
                     howto,
                 ));
@@ -347,6 +355,7 @@ fn handle_kernel_image(
                             phys,
                             &mut modules,
                             efi_map.as_deref(),
+                            efi_fb.as_deref(),
                             Some(envp.as_slice()),
                             howto,
                             false,
@@ -362,6 +371,7 @@ fn handle_kernel_image(
                             &loaded,
                             &mut modules,
                             efi_map.as_deref(),
+                            efi_fb.as_deref(),
                             Some(envp.as_slice()),
                             howto,
                         ));
@@ -381,6 +391,7 @@ fn handle_kernel_image(
                         loaded.image.len() as u64,
                         &modules,
                         efi_map.as_deref(),
+                        efi_fb.as_deref(),
                         Some(envp.as_slice()),
                     ) {
                         log::info!("kernel modulep built: {} bytes", modulep.len());

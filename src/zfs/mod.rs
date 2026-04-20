@@ -18,6 +18,7 @@ pub mod fs;
 mod label;
 pub mod nvlist;
 pub mod reader;
+pub mod sha1;
 pub mod sha256;
 mod unlock;
 
@@ -402,34 +403,42 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
     };
     if let Some(keyformat) = env.get("zfs_keyformat") {
         let keylocation = env.get("zfs_keylocation").map(|val| val.to_string());
+        let pbkdf2_salt = env.get("zfs_pbkdf2salt").and_then(parse_u64_env);
+        let pbkdf2_iters = env.get("zfs_pbkdf2iters").and_then(parse_u64_env);
         let props = DatasetProps {
             keyformat: Some(keyformat.to_string()),
             keylocation,
             kunci_jwe: None,
-            pbkdf2_salt: None,
-            pbkdf2_iters: None,
+            pbkdf2_salt,
+            pbkdf2_iters,
         };
         log::info!("zfs: using keyformat/keylocation override from env");
         if !needs_passphrase(&props) {
             return Ok(());
         }
-        let Some((pool, _)) = find_pool_for_bootenv(pools, &target) else {
-            log::warn!("zfs: unlock target not found: {}", target);
-            return Ok(());
-        };
-        let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
-        let uber = pool
-            .uber
-            .ok_or(BootError::InvalidData("uberblock missing"))?;
-        let bootfs_objset = fs::bootfs_objset(&block, pool.media_id, pool.block_size, uber)?;
-        return unlock::maybe_prompt_passphrase(
-            env,
-            &props,
-            &block,
-            pool.media_id,
-            pool.block_size,
-            &bootfs_objset,
-        );
+        if props.pbkdf2_salt.is_none() || props.pbkdf2_iters.is_none() {
+            log::warn!(
+                "zfs: passphrase override missing pbkdf2salt/pbkdf2iters; using dataset props"
+            );
+        } else {
+            let Some((pool, _)) = find_pool_for_bootenv(pools, &target) else {
+                log::warn!("zfs: unlock target not found: {}", target);
+                return Ok(());
+            };
+            let block = open_block_io(pool.handle).map_err(|err| BootError::Uefi(err.status()))?;
+            let uber = pool
+                .uber
+                .ok_or(BootError::InvalidData("uberblock missing"))?;
+            let bootfs_objset = fs::bootfs_objset(&block, pool.media_id, pool.block_size, uber)?;
+            return unlock::maybe_prompt_passphrase(
+                env,
+                &props,
+                &block,
+                pool.media_id,
+                pool.block_size,
+                &bootfs_objset,
+            );
+        }
     }
     let Some((pool, dataset_path)) = find_pool_for_bootenv(pools, &target) else {
         log::warn!("zfs: unlock target not found: {}", target);
@@ -558,6 +567,13 @@ fn zfskey_handoff_key(
     pool: &ZfsPool,
     uber: reader::types::Uberblock,
 ) -> Result<Option<Vec<u8>>> {
+    if let Some(hex) = env.get("kern.zfs.key") {
+        let key = unlock::hex_decode(hex)?;
+        validate_zfskey_len(&key)?;
+        log::info!("zfs: using prepared native key from env");
+        return Ok(Some(key));
+    }
+
     if let Some(jwe) = props.kunci_jwe.as_deref() {
         log::info!("zfs: decrypting kunci key for native handoff");
         let url_override = env.get("zfs_kunci_url");
@@ -771,6 +787,10 @@ fn parse_ipv4_env(value: &str) -> Option<[u8; 4]> {
         idx += 1;
     }
     if idx == out.len() { Some(out) } else { None }
+}
+
+fn parse_u64_env(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
 }
 
 fn unlock_dataset_target(env: &LoaderEnv) -> Option<String> {

@@ -20,6 +20,7 @@ use crate::zfs::ZfsPool;
 use uefi::Identify;
 use uefi::boot::{self, AllocateType, MemoryType, SearchType};
 use uefi::mem::memory_map::MemoryMap;
+use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 use uefi::proto::media::block::BlockIO;
 use uefi::table;
 
@@ -924,7 +925,14 @@ fn is_module_filename(name: &str) -> bool {
 
 #[allow(dead_code)]
 pub fn build_kernel_modulep(image: &elf::LoadedKernelImage, modules: &[Module]) -> Option<Vec<u8>> {
-    build_kernel_modulep_with_metadata(image.base, image.image.len() as u64, modules, None, None)
+    build_kernel_modulep_with_metadata(
+        image.base,
+        image.image.len() as u64,
+        modules,
+        None,
+        None,
+        None,
+    )
 }
 
 pub fn build_kernel_modulep_with_metadata(
@@ -932,6 +940,7 @@ pub fn build_kernel_modulep_with_metadata(
     kernel_size: u64,
     modules: &[Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
     let mut builder = ModulepBuilder::new();
@@ -942,6 +951,11 @@ pub fn build_kernel_modulep_with_metadata(
     if let Some(map) = efi_map {
         if !map.is_empty() {
             builder.add_metadata_bytes(ModInfoMd::EfiMap, map);
+        }
+    }
+    if let Some(fb) = efi_fb {
+        if !fb.is_empty() {
+            builder.add_metadata_bytes(ModInfoMd::EfiFb, fb);
         }
     }
     if let Some(ptr) = table::system_table_raw().map(|st| st.as_ptr() as u64) {
@@ -964,6 +978,7 @@ pub fn build_kernel_modulep_with_metadata_relocated(
     kernel_size: u64,
     modules: &[Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp_phys: Option<u64>,
     phys_base: u64,
     modulep_offset: u64,
@@ -982,6 +997,11 @@ pub fn build_kernel_modulep_with_metadata_relocated(
     if let Some(map) = efi_map {
         if !map.is_empty() {
             builder.add_metadata_bytes(ModInfoMd::EfiMap, map);
+        }
+    }
+    if let Some(fb) = efi_fb {
+        if !fb.is_empty() {
+            builder.add_metadata_bytes(ModInfoMd::EfiFb, fb);
         }
     }
     if let Some(ptr) = table::system_table_raw().map(|st| st.as_ptr() as u64) {
@@ -1376,6 +1396,69 @@ pub fn collect_efi_map_metadata() -> Result<Vec<u8>> {
     build_efi_map_metadata_from_raw(meta.map_size, meta.desc_size, meta.desc_version, buf)
 }
 
+pub fn collect_efi_framebuffer_metadata() -> Result<Vec<u8>> {
+    let handles = boot::locate_handle_buffer(SearchType::ByProtocol(&GraphicsOutput::GUID))
+        .map_err(|err| BootError::Uefi(err.status()))?;
+    let Some(handle) = handles.first().copied() else {
+        return Err(BootError::InvalidData("GOP handle missing"));
+    };
+    let mut gop = unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            boot::OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            boot::OpenProtocolAttributes::GetProtocol,
+        )
+        .map_err(|err| BootError::Uefi(err.status()))?
+    };
+    let info = gop.current_mode_info();
+    let (width, height) = info.resolution();
+    let stride = info.stride();
+    let (red, green, blue, reserved) = match info.pixel_format() {
+        PixelFormat::Rgb => (0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000),
+        PixelFormat::Bgr => (0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000),
+        PixelFormat::Bitmask => {
+            let mask = info
+                .pixel_bitmask()
+                .ok_or(BootError::InvalidData("GOP bitmask missing"))?;
+            (mask.red, mask.green, mask.blue, mask.reserved)
+        }
+        PixelFormat::BltOnly => {
+            return Err(BootError::InvalidData("GOP framebuffer is blt-only"));
+        }
+    };
+    let mut frame_buffer = gop.frame_buffer();
+    let fb = EfiFramebuffer {
+        fb_addr: frame_buffer.as_mut_ptr() as u64,
+        fb_size: frame_buffer.size() as u64,
+        fb_height: height as u32,
+        fb_width: width as u32,
+        fb_stride: stride as u32,
+        fb_mask_red: red,
+        fb_mask_green: green,
+        fb_mask_blue: blue,
+        fb_mask_reserved: reserved,
+    };
+    if fb.fb_addr == 0 || fb.fb_size == 0 || fb.fb_width == 0 || fb.fb_height == 0 {
+        return Err(BootError::InvalidData("GOP framebuffer invalid"));
+    }
+    log::info!(
+        "efi framebuffer: addr=0x{:x} size=0x{:x} {}x{} stride={} masks={:08x},{:08x},{:08x},{:08x}",
+        fb.fb_addr,
+        fb.fb_size,
+        fb.fb_width,
+        fb.fb_height,
+        fb.fb_stride,
+        fb.fb_mask_red,
+        fb.fb_mask_green,
+        fb.fb_mask_blue,
+        fb.fb_mask_reserved
+    );
+    Ok(fb.to_bytes())
+}
+
 fn build_efi_map_metadata_from_raw(
     map_size: usize,
     desc_size: usize,
@@ -1405,6 +1488,9 @@ fn build_efi_map_metadata_from_raw(
 
 fn push_env_vars(bytes: &mut Vec<u8>, keys: &mut Vec<String>, vars: &[EnvVar]) {
     for var in vars {
+        if is_loader_private_env(&var.key) {
+            continue;
+        }
         if keys.iter().any(|k| k == &var.key) {
             continue;
         }
@@ -1414,6 +1500,10 @@ fn push_env_vars(bytes: &mut Vec<u8>, keys: &mut Vec<String>, vars: &[EnvVar]) {
         bytes.extend_from_slice(var.value.as_bytes());
         bytes.push(0);
     }
+}
+
+fn is_loader_private_env(key: &str) -> bool {
+    key.starts_with("zfs_kunci_")
 }
 
 pub fn patch_headless_vga(
@@ -1515,6 +1605,35 @@ struct EfiMapHeader {
     pad: u32,
 }
 
+#[repr(C)]
+struct EfiFramebuffer {
+    fb_addr: u64,
+    fb_size: u64,
+    fb_height: u32,
+    fb_width: u32,
+    fb_stride: u32,
+    fb_mask_red: u32,
+    fb_mask_green: u32,
+    fb_mask_blue: u32,
+    fb_mask_reserved: u32,
+}
+
+impl EfiFramebuffer {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(40);
+        bytes.extend_from_slice(&self.fb_addr.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_size.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_height.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_width.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_stride.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_mask_red.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_mask_green.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_mask_blue.to_le_bytes());
+        bytes.extend_from_slice(&self.fb_mask_reserved.to_le_bytes());
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -1569,5 +1688,32 @@ mod tests {
         assert!(text.contains("bar=3\0"));
         assert!(text.ends_with("\0\0"));
         assert!(!text.contains("foo=2\0"));
+    }
+
+    #[test]
+    fn test_build_envp_omits_loader_private_kunci_vars() {
+        let env = LoaderEnv {
+            env_vars: alloc::vec![
+                EnvVar {
+                    key: "zfs_kunci_http_driver".to_string(),
+                    value: "\\EFI\\FreeBSD\\Drivers\\HttpDxe.efi".to_string(),
+                },
+                EnvVar {
+                    key: "kern.zfs.key".to_string(),
+                    value: "abcd".to_string(),
+                },
+                EnvVar {
+                    key: "zfs_load".to_string(),
+                    value: "YES".to_string(),
+                },
+            ],
+            conf_vars: alloc::vec![],
+        };
+
+        let envp = build_envp(&env);
+        let text = core::str::from_utf8(&envp).expect("utf8");
+        assert!(!text.contains("zfs_kunci_http_driver="));
+        assert!(text.contains("kern.zfs.key=abcd\0"));
+        assert!(text.contains("zfs_load=YES\0"));
     }
 }
