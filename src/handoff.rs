@@ -33,11 +33,12 @@ pub fn handoff_to_kernel(
     kernel: LoadedKernelImagePhys,
     modules: &mut [crate::kernel::module::Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp: Option<&[u8]>,
     howto: u32,
     stage_copy: bool,
 ) -> Status {
-    match prepare_and_handoff(kernel, modules, efi_map, envp, howto, stage_copy) {
+    match prepare_and_handoff(kernel, modules, efi_map, efi_fb, envp, howto, stage_copy) {
         Ok(_) => Status::SUCCESS,
         Err(err) => {
             log::warn!("handoff failed: {}", err);
@@ -50,10 +51,11 @@ pub fn handoff_to_kernel_staged(
     kernel: &LoadedKernelImage,
     modules: &mut [crate::kernel::module::Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp: Option<&[u8]>,
     howto: u32,
 ) -> Status {
-    match prepare_and_handoff_staged(kernel, modules, efi_map, envp, howto) {
+    match prepare_and_handoff_staged(kernel, modules, efi_map, efi_fb, envp, howto) {
         Ok(_) => Status::SUCCESS,
         Err(err) => {
             log::warn!("handoff failed: {}", err);
@@ -66,6 +68,7 @@ fn prepare_and_handoff(
     kernel: LoadedKernelImagePhys,
     modules: &mut [crate::kernel::module::Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp: Option<&[u8]>,
     howto: u32,
     stage_copy: bool,
@@ -148,6 +151,7 @@ fn prepare_and_handoff(
         kernel.size as u64,
         modules,
         efi_map,
+        efi_fb,
         envp_phys,
         phys_base,
         0,
@@ -180,6 +184,7 @@ fn prepare_and_handoff(
         kernel.size as u64,
         modules,
         efi_map,
+        efi_fb,
         envp_phys,
         phys_base,
         modulep_offset,
@@ -278,6 +283,7 @@ fn prepare_and_handoff_staged(
     kernel: &LoadedKernelImage,
     modules: &mut [crate::kernel::module::Module],
     efi_map: Option<&[u8]>,
+    efi_fb: Option<&[u8]>,
     envp: Option<&[u8]>,
     howto: u32,
 ) -> Result<()> {
@@ -333,6 +339,7 @@ fn prepare_and_handoff_staged(
         kernel.image.len() as u64,
         modules,
         efi_map,
+        efi_fb,
         envp_phys,
         phys_base,
         0,
@@ -355,6 +362,7 @@ fn prepare_and_handoff_staged(
         kernel.image.len() as u64,
         modules,
         efi_map,
+        efi_fb,
         envp_phys,
         phys_base,
         modulep_offset,
