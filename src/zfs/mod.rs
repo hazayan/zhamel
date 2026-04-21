@@ -14,6 +14,7 @@ use crate::uefi_helpers::device_path::{device_path_text_for_handle, partition_gu
 use crate::zfs::fs::DatasetProps;
 use crate::zfs::unlock::KeyLocation;
 
+mod crypt;
 pub mod fs;
 mod label;
 pub mod nvlist;
@@ -411,6 +412,7 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
             kunci_jwe: None,
             pbkdf2_salt,
             pbkdf2_iters,
+            crypto_key: None,
         };
         log::info!("zfs: using keyformat/keylocation override from env");
         if !needs_passphrase(&props) {
@@ -421,7 +423,7 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
                 "zfs: passphrase override missing pbkdf2salt/pbkdf2iters; using dataset props"
             );
         } else {
-            let Some((pool, _)) = find_pool_for_bootenv(pools, &target) else {
+            let Some((pool, dataset_path)) = find_pool_for_bootenv(pools, &target) else {
                 log::warn!("zfs: unlock target not found: {}", target);
                 return Ok(());
             };
@@ -429,6 +431,17 @@ pub fn maybe_prompt_passphrase(pools: &[ZfsPool], env: &mut LoaderEnv) -> Result
             let uber = pool
                 .uber
                 .ok_or(BootError::InvalidData("uberblock missing"))?;
+            let dataset_props = fs::bootenv_dataset_props(
+                &block,
+                pool.media_id,
+                pool.block_size,
+                uber,
+                &dataset_path,
+            )?;
+            let props = DatasetProps {
+                crypto_key: dataset_props.crypto_key,
+                ..props
+            };
             let bootfs_objset = fs::bootfs_objset(&block, pool.media_id, pool.block_size, uber)?;
             return unlock::maybe_prompt_passphrase(
                 env,
@@ -561,14 +574,15 @@ fn enable_optional_kld_module(env: &mut LoaderEnv, module: &str) {
 }
 
 fn zfskey_handoff_key(
-    env: &LoaderEnv,
+    env: &mut LoaderEnv,
     props: &DatasetProps,
     block: &uefi::proto::media::block::BlockIO,
     pool: &ZfsPool,
     uber: reader::types::Uberblock,
 ) -> Result<Option<Vec<u8>>> {
-    if let Some(hex) = env.get("kern.zfs.key") {
-        let key = unlock::hex_decode(hex)?;
+    if let Some(mut hex) = env.take("kern.zfs.key") {
+        let key = unlock::hex_decode(&hex)?;
+        unlock::scrub_string(&mut hex);
         validate_zfskey_len(&key)?;
         log::info!("zfs: using prepared native key from env");
         return Ok(Some(key));

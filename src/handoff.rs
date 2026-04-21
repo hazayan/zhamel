@@ -192,11 +192,13 @@ fn prepare_and_handoff(
         howto,
     )
     .ok_or(BootError::InvalidData("modulep build failed"))?;
-    log::warn!(
-        "modulep: offsets modulep=0x{:x} kernend=0x{:x}",
-        modulep_offset,
-        kernend_offset
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "modulep: offsets modulep=0x{:x} kernend=0x{:x}",
+            modulep_offset,
+            kernend_offset
+        );
+    }
     log_modulep_summary(&modulep_bytes);
     let modulep_dst = if stage_copy {
         modulep_addr.saturating_add(stage_offset)
@@ -233,21 +235,23 @@ fn prepare_and_handoff(
     let high_map_size = modulep_addr
         .saturating_add(modulep_bytes.len() as u64)
         .saturating_sub(modulep_base);
-    log::warn!(
-        "handoff params: stage_copy={} staging_base=0x{:x} kernel_base=0x{:x} phys_base=0x{:x} modulep_addr=0x{:x} modulep_off=0x{:x} kernend_off=0x{:x} map_size=0x{:x}",
-        stage_copy,
-        staging.base,
-        if stage_copy {
-            KERNEL_PHYS_BASE
-        } else {
-            kernel.base
-        },
-        phys_base,
-        modulep_addr,
-        modulep_offset,
-        kernend_offset,
-        high_map_size
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "handoff params: stage_copy={} staging_base=0x{:x} kernel_base=0x{:x} phys_base=0x{:x} modulep_addr=0x{:x} modulep_off=0x{:x} kernend_off=0x{:x} map_size=0x{:x}",
+            stage_copy,
+            staging.base,
+            if stage_copy {
+                KERNEL_PHYS_BASE
+            } else {
+                kernel.base
+            },
+            phys_base,
+            modulep_addr,
+            modulep_offset,
+            kernend_offset,
+            high_map_size
+        );
+    }
     let pagetable = if stage_copy {
         allocate_pagetable_staged()?
     } else {
@@ -322,11 +326,13 @@ fn prepare_and_handoff_staged(
         if !env_bytes.is_empty() {
             let staged = staging.alloc_copy(env_bytes)?;
             let phys = staged.saturating_sub(stage_offset);
-            log::warn!(
-                "envp: staged {} bytes at phys 0x{:x}",
-                env_bytes.len(),
-                phys
-            );
+            if crate::debug::enabled() {
+                log::info!(
+                    "envp: staged {} bytes at phys 0x{:x}",
+                    env_bytes.len(),
+                    phys
+                );
+            }
             Some(phys)
         } else {
             None
@@ -370,11 +376,13 @@ fn prepare_and_handoff_staged(
         howto,
     )
     .ok_or(BootError::InvalidData("modulep build failed"))?;
-    log::warn!(
-        "modulep: offsets modulep=0x{:x} kernend=0x{:x}",
-        modulep_offset,
-        kernend_offset
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "modulep: offsets modulep=0x{:x} kernend=0x{:x}",
+            modulep_offset,
+            kernend_offset
+        );
+    }
     log_modulep_summary(&modulep_bytes);
     let modulep_dst = modulep_addr.saturating_add(stage_offset);
     unsafe {
@@ -405,16 +413,18 @@ fn prepare_and_handoff_staged(
     let high_map_size = modulep_addr
         .saturating_add(modulep_bytes.len() as u64)
         .saturating_sub(0);
-    log::warn!(
-        "handoff params: stage_copy=true staging_base=0x{:x} kernel_base=0x{:x} phys_base=0x{:x} modulep_addr=0x{:x} modulep_off=0x{:x} kernend_off=0x{:x} map_size=0x{:x}",
-        staging.base,
-        kernel_phys_base,
-        phys_base,
-        modulep_addr,
-        modulep_offset,
-        kernend_offset,
-        high_map_size
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "handoff params: stage_copy=true staging_base=0x{:x} kernel_base=0x{:x} phys_base=0x{:x} modulep_addr=0x{:x} modulep_off=0x{:x} kernend_off=0x{:x} map_size=0x{:x}",
+            staging.base,
+            kernel_phys_base,
+            phys_base,
+            modulep_addr,
+            modulep_offset,
+            kernend_offset,
+            high_map_size
+        );
+    }
     let pagetable = allocate_pagetable_staged()?;
 
     let trampoline: TrampolineFn = unsafe { core::mem::transmute(tramp.addr as usize) };
@@ -438,6 +448,9 @@ fn disable_watchdog() {
 }
 
 fn log_modulep_summary(buf: &[u8]) {
+    if !crate::debug::enabled() {
+        return;
+    }
     if buf.is_empty() {
         log::warn!("modulep: empty");
         return;
@@ -516,7 +529,7 @@ fn log_modulep_summary(buf: &[u8]) {
                 if let (Some(name), Some(kind), Some(addr)) =
                     (mod_name.as_deref(), mod_type.as_deref(), mod_addr)
                 {
-                    log::warn!(
+                    log::info!(
                         "modulep: mod name={} type={} addr=0x{:x} size=0x{:x}",
                         name,
                         kind,
@@ -554,7 +567,7 @@ fn log_modulep_summary(buf: &[u8]) {
                 x if x == ModInfoMd::Howto as u32 => "Howto",
                 _ => "Metadata",
             };
-            log::warn!(
+            log::info!(
                 "modulep: md={} type=0x{:x} size=0x{:x} value=0x{:x}",
                 label,
                 md_type,
@@ -791,11 +804,13 @@ fn allocate_pagetable_staged() -> Result<u64> {
     // The page tables must be above that entire range.
     let copy_dest_end = unsafe { COPY_CTX.staging_base + COPY_CTX.kernel_size };
     let kernel_dest_ceil = (copy_dest_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    log::warn!(
-        "staged pagetable: copy_dest_end=0x{:x} ceil=0x{:x}",
-        copy_dest_end,
-        kernel_dest_ceil
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "staged pagetable: copy_dest_end=0x{:x} ceil=0x{:x}",
+            copy_dest_end,
+            kernel_dest_ceil
+        );
+    }
     let addr = {
         // Allocate below 2GB.  If the result overlaps the copy destination,
         // free it and retry (UEFI will pick a different spot).
@@ -824,11 +839,13 @@ fn allocate_pagetable_staged() -> Result<u64> {
         }
     };
     let raw_base = addr.as_ptr() as u64;
-    log::warn!(
-        "staged pagetable: raw_base=0x{:x} low_bits=0x{:x}",
-        raw_base,
-        raw_base & 0xFFF
-    );
+    if crate::debug::enabled() {
+        log::info!(
+            "staged pagetable: raw_base=0x{:x} low_bits=0x{:x}",
+            raw_base,
+            raw_base & 0xFFF
+        );
+    }
     let base = raw_base & !0xFFF; // ensure page-aligned for CR3
     unsafe {
         core::ptr::write_bytes(base as *mut u8, 0, (pages as u64 * PAGE_SIZE) as usize);
@@ -1128,19 +1145,27 @@ fn kernel_entry_offset_with_phdrs(
 
 fn select_kernel_entry(info: &crate::kernel::elf::Elf64Info, entry: u64) -> u64 {
     if entry != 0 {
-        log::warn!("kernel entry: using e_entry=0x{:x}", entry);
+        if crate::debug::enabled() {
+            log::info!("kernel entry: using e_entry=0x{:x}", entry);
+        }
         return entry;
     }
     if let Some(btext) = info.btext {
-        log::warn!("kernel entry: using btext=0x{:x}", btext);
+        if crate::debug::enabled() {
+            log::info!("kernel entry: using btext=0x{:x}", btext);
+        }
         return btext;
     }
     if let Some(btext) = info.section_addr(".btext") {
-        log::warn!("kernel entry: using .btext=0x{:x}", btext);
+        if crate::debug::enabled() {
+            log::info!("kernel entry: using .btext=0x{:x}", btext);
+        }
         return btext;
     }
     if let Some(text) = info.section_addr(".text") {
-        log::warn!("kernel entry: using .text=0x{:x}", text);
+        if crate::debug::enabled() {
+            log::info!("kernel entry: using .text=0x{:x}", text);
+        }
         return text;
     }
     entry

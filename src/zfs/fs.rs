@@ -15,7 +15,7 @@ use crate::zfs::reader::mos;
 use crate::zfs::reader::objset::{ObjsetPhys, objset_get_dnode};
 use crate::zfs::reader::types::{BLK_PTR_SIZE, BlkPtr};
 use crate::zfs::reader::zap::{
-    zap_list, zap_list_entries, zap_lookup_u64, zap_lookup_u64_normalized,
+    zap_list, zap_list_entries, zap_lookup_bytes, zap_lookup_u64, zap_lookup_u64_normalized,
 };
 
 const DMU_POOL_DIRECTORY_OBJECT: u64 = 1;
@@ -32,6 +32,13 @@ const DSL_DATASET_PROPS_OFFSET: usize = 264;
 const ZNODE_SIZE_OFFSET: usize = 80;
 const SA_MAGIC: u32 = 0x2F505A;
 const SA_SIZE_OFFSET: usize = 8;
+const DSL_CRYPTO_KEY_CRYPTO_SUITE: &str = "DSL_CRYPTO_SUITE";
+const DSL_CRYPTO_KEY_GUID: &str = "DSL_CRYPTO_GUID";
+const DSL_CRYPTO_KEY_IV: &str = "DSL_CRYPTO_IV";
+const DSL_CRYPTO_KEY_MAC: &str = "DSL_CRYPTO_MAC";
+const DSL_CRYPTO_KEY_MASTER_KEY: &str = "DSL_CRYPTO_MASTER_KEY_1";
+const DSL_CRYPTO_KEY_HMAC_KEY: &str = "DSL_CRYPTO_HMAC_KEY_1";
+const DSL_CRYPTO_KEY_VERSION: &str = "DSL_CRYPTO_VERSION";
 
 #[derive(Clone, Debug, Default)]
 pub struct DatasetProps {
@@ -40,6 +47,18 @@ pub struct DatasetProps {
     pub kunci_jwe: Option<String>,
     pub pbkdf2_salt: Option<u64>,
     pub pbkdf2_iters: Option<u64>,
+    pub crypto_key: Option<CryptoKeyInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CryptoKeyInfo {
+    pub crypt: u64,
+    pub guid: u64,
+    pub version: u64,
+    pub master_key: Vec<u8>,
+    pub hmac_key: Vec<u8>,
+    pub iv: Vec<u8>,
+    pub mac: Vec<u8>,
 }
 
 pub fn read_file_from_bootenv(pool: &ZfsPool, bootenv: &str, path: &str) -> Result<Vec<u8>> {
@@ -280,6 +299,14 @@ fn merge_crypto_props(
             "pbkdf2iters",
         )?;
     }
+    if props.crypto_key.is_none() {
+        props.crypto_key = Some(read_crypto_key_info(
+            block,
+            media_id,
+            block_size,
+            &crypto_dnode,
+        )?);
+    }
     Ok(())
 }
 
@@ -299,6 +326,70 @@ fn merge_missing_props(dst: &mut DatasetProps, src: DatasetProps) {
     if dst.pbkdf2_iters.is_none() {
         dst.pbkdf2_iters = src.pbkdf2_iters;
     }
+    if dst.crypto_key.is_none() {
+        dst.crypto_key = src.crypto_key;
+    }
+}
+
+fn read_crypto_key_info(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    crypto_dnode: &DnodePhys,
+) -> Result<CryptoKeyInfo> {
+    let crypt = zap_lookup_u64_normalized(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_CRYPTO_SUITE,
+    )?;
+    let guid = zap_lookup_u64_normalized(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_GUID,
+    )?;
+    let master_key = zap_lookup_bytes(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_MASTER_KEY,
+    )?;
+    let hmac_key = zap_lookup_bytes(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_HMAC_KEY,
+    )?;
+    let iv = zap_lookup_bytes(block, media_id, block_size, crypto_dnode, DSL_CRYPTO_KEY_IV)?;
+    let mac = zap_lookup_bytes(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_MAC,
+    )?;
+    let version = zap_lookup_u64_normalized_opt(
+        block,
+        media_id,
+        block_size,
+        crypto_dnode,
+        DSL_CRYPTO_KEY_VERSION,
+    )?
+    .unwrap_or(0);
+    Ok(CryptoKeyInfo {
+        crypt,
+        guid,
+        version,
+        master_key,
+        hmac_key,
+        iv,
+        mac,
+    })
 }
 
 fn keyformat_name(value: u64) -> String {
