@@ -134,7 +134,7 @@ pub fn read_file_from_boot_volume(path: &str) -> Option<Vec<u8>> {
     match fs.read(path.as_ref()) {
         Ok(bytes) => Some(bytes),
         Err(err) => {
-            log::warn!("boot volume read failed: {:?} ({})", err, path);
+            log::info!("boot volume read failed: {:?} ({})", err, path);
             None
         }
     }

@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::ptr;
 
 use uefi::boot;
 use uefi::proto::media::block::BlockIO;
@@ -13,6 +14,9 @@ use crate::tang;
 use crate::zfs::fs::{DatasetProps, read_file_from_objset};
 use crate::zfs::reader::objset::ObjsetPhys;
 use crate::zfs::sha1::Sha1;
+
+const DEFAULT_PASSPHRASE_ATTEMPTS: u32 = 3;
+const MAX_PASSPHRASE_ATTEMPTS: u32 = 10;
 
 #[derive(Debug)]
 pub enum KeyLocation {
@@ -47,25 +51,21 @@ pub fn maybe_prompt_passphrase(
         .unwrap_or(KeyLocation::Prompt);
 
     match keylocation {
-        KeyLocation::Prompt => {
-            let passphrase = prompt_passphrase("ZFS Passphrase: ")?;
-            set_passphrase_key(env, props, &passphrase)?;
-            Ok(())
-        }
+        KeyLocation::Prompt => set_prompted_passphrase_key(env, props),
         KeyLocation::File(path) => match read_keyfile(block, media_id, block_size, objset, &path) {
-            Ok(passphrase) => {
+            Ok(mut passphrase) => {
                 log::info!("zfs: passphrase loaded from keylocation file");
-                set_passphrase_key(env, props, &passphrase)?;
+                let result = set_passphrase_key(env, props, &passphrase);
+                scrub_string(&mut passphrase);
+                result?;
                 Ok(())
             }
             Err(err) => {
                 log::warn!("zfs: keylocation file read failed: {:?}, prompting", err);
-                let passphrase = prompt_passphrase("ZFS Passphrase: ")?;
-                set_passphrase_key(env, props, &passphrase)?;
-                Ok(())
+                set_prompted_passphrase_key(env, props)
             }
         },
-        KeyLocation::Unknown => Ok(()),
+        KeyLocation::Unknown => Err(BootError::Unsupported("zfs passphrase keylocation")),
     }
 }
 
@@ -82,14 +82,16 @@ pub fn maybe_unlock_kunci(env: &mut LoaderEnv, props: &DatasetProps) -> Result<(
     let http_driver = env.get("zfs_kunci_http_driver");
     let local_ip = env.get("zfs_kunci_ip").and_then(parse_ipv4);
     let netmask = env.get("zfs_kunci_netmask").and_then(parse_ipv4);
-    let key = tang::decrypt_tang_jwe(jwe, url_override, http_driver, local_ip, netmask)?;
+    let mut key = tang::decrypt_tang_jwe(jwe, url_override, http_driver, local_ip, netmask)?;
     if key.len() != 32 {
         return Err(BootError::InvalidData(
             "kunci zfs key must be exactly 32 bytes",
         ));
     }
-    let hex = hex_encode(&key);
+    let mut hex = hex_encode(&key);
+    scrub_vec(&mut key);
     env.set("kern.zfs.key", &hex);
+    scrub_string(&mut hex);
     log::info!("zfs: kunci unlock ok (key_len={})", key.len());
     Ok(())
 }
@@ -156,6 +158,47 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
+fn set_prompted_passphrase_key(env: &mut LoaderEnv, props: &DatasetProps) -> Result<()> {
+    if let Some(mut passphrase) = env.take("kern.zfs.passphrase") {
+        log::info!("zfs: using preseeded passphrase from env");
+        let result = set_passphrase_key(env, props, &passphrase);
+        scrub_string(&mut passphrase);
+        return result;
+    }
+
+    let attempts = passphrase_attempts(env);
+    let mut last_err = BootError::InvalidData("zfs passphrase input failed");
+    for attempt in 1..=attempts {
+        let mut passphrase = prompt_passphrase("ZFS Passphrase: ")?;
+        let result = set_passphrase_key(env, props, &passphrase);
+        scrub_string(&mut passphrase);
+        match result {
+            Ok(()) => return Ok(()),
+            Err(BootError::InvalidData(msg)) => {
+                last_err = BootError::InvalidData(msg);
+                if attempt < attempts {
+                    log::warn!(
+                        "zfs: passphrase attempt {}/{} rejected: {}",
+                        attempt,
+                        attempts,
+                        msg
+                    );
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err)
+}
+
+fn passphrase_attempts(env: &LoaderEnv) -> u32 {
+    env.get("zfs_passphrase_attempts")
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_PASSPHRASE_ATTEMPTS))
+        .unwrap_or(DEFAULT_PASSPHRASE_ATTEMPTS)
+}
+
 fn set_passphrase_key(env: &mut LoaderEnv, props: &DatasetProps, passphrase: &str) -> Result<()> {
     let Some(salt) = props.pbkdf2_salt else {
         return Err(BootError::InvalidData("zfs passphrase salt missing"));
@@ -163,10 +206,22 @@ fn set_passphrase_key(env: &mut LoaderEnv, props: &DatasetProps, passphrase: &st
     let Some(iters) = props.pbkdf2_iters else {
         return Err(BootError::InvalidData("zfs passphrase pbkdf2iters missing"));
     };
-    let key = derive_passphrase_key(passphrase, salt, iters)?;
-    env.set("kern.zfs.key", &hex_encode(&key));
+    let mut key = derive_passphrase_key(passphrase, salt, iters)?;
+    let Some(crypto_key) = props.crypto_key.as_ref() else {
+        scrub_vec(&mut key);
+        return Err(BootError::InvalidData("zfs crypto key metadata missing"));
+    };
+    let validation = super::crypt::validate_wrapping_key(&key, crypto_key);
+    if validation.is_err() {
+        scrub_vec(&mut key);
+    }
+    validation?;
+    let mut key_hex = hex_encode(&key);
+    scrub_vec(&mut key);
+    env.set("kern.zfs.key", &key_hex);
+    scrub_string(&mut key_hex);
     env.unset("kern.zfs.passphrase");
-    log::info!("zfs: passphrase key derived (key_len={})", key.len());
+    log::info!("zfs: passphrase key derived and validated (key_len=32)");
     Ok(())
 }
 
@@ -180,12 +235,9 @@ pub fn derive_passphrase_key(passphrase: &str, salt: u64, iters: u64) -> Result<
     }
 
     let mut salt_bytes = salt.to_le_bytes().to_vec();
-    Ok(pbkdf2_hmac_sha1(
-        passphrase,
-        &mut salt_bytes,
-        iters as u32,
-        32,
-    ))
+    let key = pbkdf2_hmac_sha1(passphrase, &mut salt_bytes, iters as u32, 32);
+    scrub_vec(&mut salt_bytes);
+    Ok(key)
 }
 
 fn pbkdf2_hmac_sha1(
@@ -210,6 +262,8 @@ fn pbkdf2_hmac_sha1(
         }
         let remaining = out_len - out.len();
         out.extend_from_slice(&t[..remaining.min(t.len())]);
+        scrub_array(&mut u);
+        scrub_array(&mut t);
     }
     out
 }
@@ -237,7 +291,11 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
     let mut outer = Sha1::new();
     outer.update(&opad);
     outer.update(&inner_digest);
-    outer.finalize()
+    let digest = outer.finalize();
+    scrub_array(&mut key_block);
+    scrub_array(&mut ipad);
+    scrub_array(&mut opad);
+    digest
 }
 
 fn sha1_bytes(data: &[u8]) -> [u8; 20] {
@@ -289,6 +347,30 @@ fn prompt_passphrase(prompt: &str) -> Result<String> {
     Ok(out)
 }
 
+pub(crate) fn scrub_string(value: &mut String) {
+    unsafe {
+        scrub_slice(value.as_mut_vec());
+    }
+    value.clear();
+}
+
+fn scrub_vec(value: &mut Vec<u8>) {
+    scrub_slice(value.as_mut_slice());
+    value.clear();
+}
+
+fn scrub_array<const N: usize>(value: &mut [u8; N]) {
+    scrub_slice(value.as_mut_slice());
+}
+
+fn scrub_slice(value: &mut [u8]) {
+    for byte in value {
+        unsafe {
+            ptr::write_volatile(byte, 0);
+        }
+    }
+}
+
 fn read_line(out: &mut String) -> bool {
     let mut hit = false;
     system::with_stdin(|stdin| {
@@ -327,8 +409,12 @@ fn read_line(out: &mut String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyLocation, derive_passphrase_key, hex_decode, parse_keylocation, pbkdf2_hmac_sha1,
+        KeyLocation, derive_passphrase_key, hex_decode, parse_keylocation, passphrase_attempts,
+        pbkdf2_hmac_sha1, scrub_string,
     };
+    use crate::env::loader::LoaderEnv;
+    use crate::env::parser::EnvVar;
+    use alloc::string::ToString;
 
     #[test]
     fn parse_keylocation_prompt() {
@@ -387,5 +473,26 @@ mod tests {
     #[test]
     fn hex_decode_accepts_upper_and_lowercase() {
         assert_eq!(hex_decode("00aAFf").expect("hex"), [0x00, 0xaa, 0xff]);
+    }
+
+    #[test]
+    fn passphrase_attempts_defaults_and_clamps() {
+        let mut env = LoaderEnv {
+            env_vars: alloc::vec::Vec::new(),
+            conf_vars: alloc::vec::Vec::new(),
+        };
+        assert_eq!(passphrase_attempts(&env), 3);
+        env.env_vars.push(EnvVar {
+            key: "zfs_passphrase_attempts".to_string(),
+            value: "99".to_string(),
+        });
+        assert_eq!(passphrase_attempts(&env), 10);
+    }
+
+    #[test]
+    fn scrub_string_clears_value() {
+        let mut value = "secret-value".to_string();
+        scrub_string(&mut value);
+        assert!(value.is_empty());
     }
 }

@@ -54,6 +54,16 @@ impl LoaderEnv {
         self.env_vars.retain(|var| var.key != key);
         self.conf_vars.retain(|var| var.key != key);
     }
+
+    pub fn take(&mut self, key: &str) -> Option<String> {
+        if let Some(idx) = self.env_vars.iter().position(|var| var.key == key) {
+            return Some(self.env_vars.remove(idx).value);
+        }
+        if let Some(idx) = self.conf_vars.iter().position(|var| var.key == key) {
+            return Some(self.conf_vars.remove(idx).value);
+        }
+        None
+    }
 }
 
 pub fn load_from_boot_volume() -> LoaderEnv {
@@ -155,7 +165,7 @@ where
 
     if get_env_value(env_vars, &conf_vars, "loader_conf_files").is_none() {
         let fallback = "/boot/device.hints /boot/loader.conf";
-        log::warn!("loader_conf_files not set; falling back to {}", fallback);
+        log::info!("loader_conf_files not set; falling back to {}", fallback);
         set_conf_var(
             &mut conf_vars,
             "loader_conf_files".to_string(),

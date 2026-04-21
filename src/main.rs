@@ -18,6 +18,8 @@ mod console;
 #[cfg(target_os = "uefi")]
 mod currdev;
 #[cfg(target_os = "uefi")]
+mod debug;
+#[cfg(target_os = "uefi")]
 mod devsw;
 #[cfg(target_os = "uefi")]
 mod env;
@@ -426,6 +428,7 @@ fn main() -> Status {
     if let Err(err) = uefi::helpers::init() {
         return err.status();
     }
+    log::set_max_level(log::LevelFilter::Warn);
     if let Err(err) = heap::init() {
         log::error!("heap init failed: {}", err);
         return exit::finish(err.status());
@@ -455,6 +458,7 @@ fn main() -> Status {
     }
 
     let mut loader_env = env::loader::load_from_boot_volume();
+    debug::init(&loader_env);
     fs::uefi::cache_boot_fs_device();
     if let Some(path) = loader_env.get("zfs_kunci_http_driver") {
         tang::cache_http_drivers(path);
@@ -549,6 +553,7 @@ fn main() -> Status {
     }
     if let Err(err) = zfs::maybe_prompt_passphrase(&zfs_pools, &mut loader_env) {
         log::warn!("zfs passphrase prompt failed: {}", err);
+        return Status::LOAD_ERROR;
     }
 
     if let Some((pool_index, zfs_source, kernel)) =
@@ -560,6 +565,7 @@ fn main() -> Status {
             &zfs_source,
             &mut loader_env,
         );
+        debug::init(&loader_env);
         if let Err(err) = zfs::maybe_unlock_kunci(&zfs_pools, &mut loader_env) {
             log::warn!("zfs kunci unlock failed after loader.conf reload: {}", err);
         }
@@ -568,6 +574,7 @@ fn main() -> Status {
                 "zfs passphrase prompt failed after loader.conf reload: {}",
                 err
             );
+            return Status::LOAD_ERROR;
         }
         let zfskey_module = match zfs::maybe_prepare_zfskey_handoff(&zfs_pools, &mut loader_env) {
             Ok(module) => module,

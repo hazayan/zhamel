@@ -61,6 +61,22 @@ pub fn zap_lookup_string(
     }
 }
 
+pub fn zap_lookup_bytes(
+    block: &BlockIO,
+    media_id: u32,
+    block_size: usize,
+    dnode: &DnodePhys,
+    name: &str,
+) -> Result<Vec<u8>> {
+    let size = dnode.block_size();
+    let data = dnode_read(block, media_id, block_size, dnode, 0, size)?;
+    match u64::from_le_bytes(data[0..8].try_into().unwrap()) {
+        ZBT_MICRO => Err(BootError::InvalidData("mzap does not store byte arrays")),
+        ZBT_HEADER => fzap_lookup_bytes(block, media_id, block_size, dnode, &data, name),
+        _ => Err(BootError::InvalidData("zap type invalid")),
+    }
+}
+
 pub fn zap_lookup_u64_normalized(
     block: &BlockIO,
     media_id: u32,
