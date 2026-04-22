@@ -1,0 +1,58 @@
+name: Release Source Tarballs
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-source:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require tag commit to be on main
+        id: ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+            echo "on_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on_main=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $GITHUB_REF does not point to a commit on origin/main; skipping release."
+          fi
+
+      - name: Build source tarballs
+        if: steps.ancestry.outputs.on_main == 'true'
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          prefix="${REPO_NAME}-${TAG_NAME}/"
+          git archive --format=tar --prefix="$prefix" "$GITHUB_SHA" | gzip -n > "dist/${REPO_NAME}-${TAG_NAME}.tar.gz"
+          git archive --format=tar --prefix="$prefix" "$GITHUB_SHA" | xz -T0 > "dist/${REPO_NAME}-${TAG_NAME}.tar.xz"
+          sha256sum "dist/${REPO_NAME}-${TAG_NAME}.tar.gz" "dist/${REPO_NAME}-${TAG_NAME}.tar.xz" > "dist/${REPO_NAME}-${TAG_NAME}.sha256"
+
+      - name: Create or update release
+        if: steps.ancestry.outputs.on_main == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.xz
+            dist/*.sha256
