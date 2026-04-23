@@ -13,8 +13,8 @@ FreeBSD kernels in the same way as the original C loader.
 
 ## Feature Parity (amd64)
 
-The parity roadmap is tracked in `docs/implementation-todo.md`. All items are
-checked off, including:
+The amd64 loader path is feature-complete for the standard FreeBSD EFI loader
+behaviors zhamel currently targets, including:
 
 - Device and filesystem breadth (UFS/ZFS)
 - Boot manager integration and currdev selection
@@ -33,8 +33,9 @@ Zhamel adds native ZFS unlock support:
   - Performs JWE recovery and derives the dataset key
   - Uses UEFI HTTP with optional driver preload for full-network flow
 
-See `docs/implementation-todo.md` and `docs/validation-log.md` for the
-completion and validation status.
+This includes loader-side passphrase validation, key staging for the
+`zhamel_zfskey` kernel module, and Tang/Clevis recovery when the required UEFI
+network drivers are available.
 
 ## Supported Encrypted-Root Layout
 
@@ -144,5 +145,7 @@ This runs host-based coverage with the `host-coverage` feature enabled.
 
 ## Validation
 
-Recent full-suite runs (stock OVMF and HTTP-enabled OVMF) are logged in
-`docs/validation-log.md`.
+Recent validation has covered native passphrase unlock, wrong-passphrase
+rejection before kernel handoff, successful encrypted-root boot with
+`zhamel_zfskey.ko`, and QEMU-based integration scenarios for the supported EFI
+boot path.
