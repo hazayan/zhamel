@@ -378,7 +378,7 @@ PY
     KUNCI_TANG="$(awk -F= '/^kunci_tang=/{print $2}' "$ZFS_REAL_FILE")"
     KUNCI_PORT="$(awk -F= '/^kunci_port=/{print $2}' "$ZFS_REAL_FILE")"
     KUNCI_HTTP="$(awk -F= '/^kunci_http=/{print $2}' "$ZFS_REAL_FILE")"
-    KUNCI_HTTP_DRIVER="$(awk -F= '/^kunci_http_driver=/{print $2}' "$ZFS_REAL_FILE")"
+    KUNCI_HTTP_DRIVER="${KUNCI_HTTP_DRIVER:-$(awk -F= '/^kunci_http_driver=/{print $2}' "$ZFS_REAL_FILE")}"
     KUNCI_TRUST="$(awk -F= '/^kunci_trust=/{print $2}' "$ZFS_REAL_FILE")"
     KUNCI_THP="$(awk -F= '/^kunci_thp=/{print $2}' "$ZFS_REAL_FILE")"
     if [[ -z "$ZFS_REAL_POOL_NAME" ]]; then
@@ -463,7 +463,7 @@ PY
       fi
     done
     if [[ -n "$KUNCI_TANG" && -n "$ZFS_REAL_BOOTENV_ENCRYPTED" ]]; then
-      KUNCI_ROOT="${KUNCI_ROOT:-/home/operator/devel/system/kunci}"
+      KUNCI_ROOT="${KUNCI_ROOT:-$ROOT/../kunci}"
       KUNCI_SERVER_BIN="$KUNCI_ROOT/target/release/kunci-server"
       KUNCI_CLIENT_BIN="$KUNCI_ROOT/target/release/kunci-client"
       if [[ ! -x "$KUNCI_SERVER_BIN" || ! -x "$KUNCI_CLIENT_BIN" ]]; then
