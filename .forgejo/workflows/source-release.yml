@@ -1,0 +1,68 @@
+name: source release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+jobs:
+  release:
+    runs-on:
+      - freebsd
+      - package-builder
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish source archive
+        shell: sh
+        run: |
+          set -eu
+          umask 077
+
+          tag="${GITHUB_REF_NAME:-${GITHUB_REF#refs/tags/}}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          forgejo_host="${FORGEJO_HOST:-https://forge.svc.hazayan.net}"
+          forgejo_repo="${GITHUB_REPOSITORY}"
+          openbao_addr="${OPENBAO_ADDR:-https://vault.svc.hazayan.net}"
+          openbao_token_file="${OPENBAO_TOKEN_FILE:-/home/runner/.config/kha/openbao-token}"
+          signing_key_id="${OPENBAO_SOURCE_RELEASE_SIGNING_KEY_ID:-foji-bsd:pkg-repo-signing-key-b64}"
+
+          mkdir -p release
+          archive="release/${repo}-${tag}.tar.gz"
+          git archive --format=tar --prefix="${repo}-${tag}/" "${tag}" | gzip -n > "${archive}"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            sha256 -r "${archive}" > "${archive}.sha256"
+          fi
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+          if [ -z "${BAO_TOKEN:-}" ]; then
+            [ -r "${openbao_token_file}" ] || { echo "OpenBao token file not readable: ${openbao_token_file}" >&2; exit 1; }
+            BAO_TOKEN="$(cat "${openbao_token_file}")"
+            export BAO_TOKEN
+          fi
+          curl -fsS --header "X-Vault-Token: ${BAO_TOKEN}" \
+            "${openbao_addr}/v1/secret/data/kha/by-id/${signing_key_id}" |
+            jq -r '.data.data.value' |
+            tr -d '\n' |
+            base64 -d > "${workdir}/source-release.key.der"
+          openssl ec -inform DER -in "${workdir}/source-release.key.der" -out "${workdir}/source-release.key.pem"
+          openssl dgst -sha256 -sign "${workdir}/source-release.key.pem" -out "${archive}.sig" "${archive}"
+
+          notes="Automated source release for ${repo} ${tag}."
+          if fj --host "${forgejo_host}" release view -r "${forgejo_repo}" "${tag}" >/dev/null 2>&1; then
+            fj --host "${forgejo_host}" release edit -r "${forgejo_repo}" "${tag}" -b "${notes}"
+          else
+            fj --host "${forgejo_host}" release create -r "${forgejo_repo}" --tag "${tag}" -b "${notes}" "${tag}"
+          fi
+
+          for asset in "${archive}" "${archive}.sha256" "${archive}.sig"; do
+            name="$(basename "${asset}")"
+            fj --host "${forgejo_host}" release asset delete -r "${forgejo_repo}" "${tag}" "${name}" >/dev/null 2>&1 || true
+            fj --host "${forgejo_host}" release asset create -r "${forgejo_repo}" "${tag}" "${asset}" "${name}"
+          done
