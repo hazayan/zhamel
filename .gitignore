@@ -17,6 +17,3 @@ tmp/integration/assets/
 !tests/**/README.md
 
 !README.md
-AGENTS.md
-CLAUDE.md
-.claude/

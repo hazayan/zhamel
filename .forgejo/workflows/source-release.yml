@@ -19,6 +19,8 @@ jobs:
 
       - name: Publish source archive
         shell: sh
+        env:
+          SOURCE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FOJI_BSD_PKG_REPO_SIGNING_KEY_B64 }}
         run: |
           set -eu
           umask 077
@@ -27,9 +29,6 @@ jobs:
           repo="${GITHUB_REPOSITORY#*/}"
           forgejo_host="${FORGEJO_HOST:-https://forge.svc.hazayan.net}"
           forgejo_repo="${GITHUB_REPOSITORY}"
-          openbao_addr="${OPENBAO_ADDR:-https://vault.svc.hazayan.net}"
-          openbao_token_file="${OPENBAO_TOKEN_FILE:-/home/runner/.config/kha/openbao-token}"
-          signing_key_id="${OPENBAO_SOURCE_RELEASE_SIGNING_KEY_ID:-foji-bsd:pkg-repo-signing-key-b64}"
 
           mkdir -p release
           archive="release/${repo}-${tag}.tar.gz"
@@ -41,17 +40,16 @@ jobs:
             sha256 -r "${archive}" > "${archive}.sha256"
           fi
 
+          [ -n "${SOURCE_RELEASE_SIGNING_KEY_B64:-}" ] || {
+            echo "SOURCE_RELEASE_SIGNING_KEY_B64 secret is required" >&2
+            exit 1
+          }
+
           workdir="$(mktemp -d)"
           trap 'rm -rf "${workdir}"' EXIT
-          if [ -z "${BAO_TOKEN:-}" ]; then
-            [ -r "${openbao_token_file}" ] || { echo "OpenBao token file not readable: ${openbao_token_file}" >&2; exit 1; }
-            BAO_TOKEN="$(cat "${openbao_token_file}")"
-            export BAO_TOKEN
-          fi
-          curl -fsS --header "X-Vault-Token: ${BAO_TOKEN}" \
-            "${openbao_addr}/v1/secret/data/kha/by-id/${signing_key_id}" |
-            jq -r '.data.data.value' |
-            tr -d '\n' |
+          printf '%s' "${SOURCE_RELEASE_SIGNING_KEY_B64}" |
+            tr -d '
+' |
             base64 -d > "${workdir}/source-release.key.der"
           openssl ec -inform DER -in "${workdir}/source-release.key.der" -out "${workdir}/source-release.key.pem"
           openssl dgst -sha256 -sign "${workdir}/source-release.key.pem" -out "${archive}.sig" "${archive}"
