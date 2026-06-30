@@ -12,6 +12,7 @@ tmp/integration/assets/
 *.log
 *.txt
 
+!devlog.txt
 !tools/*.sh
 !tools/**/*.sh
 !tests/**/README.md

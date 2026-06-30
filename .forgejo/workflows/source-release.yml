@@ -5,6 +5,7 @@ on:
     tags:
       - "v*"
       - "[0-9]*"
+  workflow_dispatch:
 
 jobs:
   release:
@@ -48,8 +49,7 @@ jobs:
           workdir="$(mktemp -d)"
           trap 'rm -rf "${workdir}"' EXIT
           printf '%s' "${SOURCE_RELEASE_SIGNING_KEY_B64}" |
-            tr -d '
-' |
+            tr -d '\n' |
             base64 -d > "${workdir}/source-release.key.der"
           openssl ec -inform DER -in "${workdir}/source-release.key.der" -out "${workdir}/source-release.key.pem"
           openssl dgst -sha256 -sign "${workdir}/source-release.key.pem" -out "${archive}.sig" "${archive}"
